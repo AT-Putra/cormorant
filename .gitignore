@@ -1,0 +1,27 @@
+# runtime volumes / app state — never commit
+config/
+data/
+media/
+
+# agent + editor scratch
+.omc/
+.claude/
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# node
+node_modules/
+frontend/dist/
+
+# stray test output
+pytest_out.txt
+
+# os
+Thumbs.db
+.DS_Store

@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+@keyframes dialog-pop {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
+  }
+}
+@keyframes dialog-fade {
+  from {
+    opacity: 0;
+  }
+}
+dialog[open] {
+  animation: dialog-pop 0.15s ease-out;
+}
+dialog[open]::backdrop {
+  animation: dialog-fade 0.15s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  dialog[open],
+  dialog[open]::backdrop {
+    animation: none;
+  }
+}

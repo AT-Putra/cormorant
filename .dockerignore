@@ -1,0 +1,11 @@
+node_modules
+frontend/node_modules
+frontend/dist
+.omc
+data
+config
+media
+__pycache__
+**/__pycache__
+*.pyc
+.git

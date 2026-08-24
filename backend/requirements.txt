@@ -1,0 +1,13 @@
+fastapi>=0.141
+uvicorn[standard]>=0.30
+sqlalchemy[asyncio]>=2.0.52
+aiosqlite
+yt-dlp>=2026.8.19
+streamlink>=8.5
+bcrypt
+cryptography
+httpx
+python-multipart
+psutil
+pytest
+pytest-asyncio>=0.25

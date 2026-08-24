@@ -1,0 +1,28 @@
+# Plain Compose Spec — runs identically via `podman compose` (dev, rootless)
+# and `docker compose up` (prod). No engine-specific extensions.
+#
+# NAMED VOLUMES ONLY: Docker/Podman copy-on-first-use initializes named volumes
+# from image content, carrying the seeded /config/venv into fresh volumes.
+# A host-bind on /config would HIDE the seeded venv and break non-root writes
+# (Decision C in .omc/plans/video-downloader-plan.md) — do not switch to binds.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: cormorant
+    restart: unless-stopped   # also the vehicle for post-yt-dlp-update restarts
+    ports:
+      - "8000:8000"
+    volumes:
+      - vd_config:/config
+      - vd_data:/data
+      - vd_media:/media
+    environment:
+      - TZ=${TZ:-UTC}         # quiet-hours correctness
+
+volumes:
+  vd_config:
+  vd_data:
+  vd_media:

@@ -1,0 +1,9 @@
+[project]
+name = "cormorant-backend"
+version = "0.1.0"
+description = "Self-hosted multi-platform video and live stream downloader (backend)"
+requires-python = ">=3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
