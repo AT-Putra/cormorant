@@ -9,15 +9,17 @@ function fmtBytes(n: number | null | undefined): string {
 }
 
 const STATUS_STYLES: Record<string, string> = {
-  queued: "bg-zinc-800 text-zinc-300",
-  probing: "bg-blue-950 text-blue-300",
-  downloading: "bg-blue-950 text-blue-300",
-  paused: "bg-yellow-950 text-yellow-300",
-  paused_space_floor: "bg-orange-950 text-orange-300",
-  done: "bg-emerald-950 text-emerald-300",
-  failed: "bg-red-950 text-red-300",
-  skipped: "bg-zinc-800 text-zinc-400",
+  queued: "bg-surface-3 text-ink-dim",
+  probing: "bg-cyan-950/60 text-cyan-300",
+  downloading: "bg-cyan-950/60 text-cyan-300",
+  paused: "bg-yellow-950/60 text-yellow-300",
+  paused_space_floor: "bg-orange-950/60 text-orange-300",
+  done: "bg-emerald-950/60 text-emerald-300",
+  failed: "bg-red-950/60 text-red-300",
+  skipped: "bg-surface-3 text-ink-faint",
 };
+
+const ACTIVE_STATUSES = ["downloading", "probing"];
 
 export default function Queue() {
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
@@ -86,7 +88,7 @@ export default function Queue() {
       await api.createJob({
         url: url.trim(),
         format_id: formatId || null,
-        audio_only: redownload ? audioOnly : audioOnly,
+        audio_only: audioOnly,
         redownload,
       });
       setUrl("");
@@ -110,41 +112,48 @@ export default function Queue() {
 
   return (
     <div className="space-y-6">
-      <section className="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
-        <h2 className="mb-3 text-sm font-medium text-zinc-400">New download</h2>
-        <div className="flex gap-2">
+      <section className="card card-hover p-5 sm:p-6">
+        <h2 className="mb-4 flex items-center gap-2 text-sm font-medium tracking-wide text-ink-dim uppercase">
+          <span aria-hidden className="h-4 w-1 rounded-full bg-gradient-to-b from-accent to-accent-2" />
+          New download
+        </h2>
+        <div className="flex flex-col gap-2 sm:flex-row">
           <input
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && doProbe()}
             placeholder="Paste a bilibili / instagram / tiktok / douyin / xiaohongshu URL"
-            className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none focus:border-zinc-500"
+            className="input flex-1"
           />
           <button
             onClick={doProbe}
             disabled={busy || !url.trim()}
-            className="rounded-md bg-zinc-700 px-4 py-2 text-sm font-medium hover:bg-zinc-600 disabled:opacity-50"
+            className="btn-secondary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm font-medium text-ink disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Probe
+            {busy && !probe ? "Probing…" : "Probe"}
           </button>
         </div>
 
         {probe && (
-          <div className="mt-4 space-y-3 rounded-lg border border-zinc-800 p-4">
-            <div className="text-sm">
-              <span className="font-medium">{probe.title}</span>
-              <span className="ml-2 text-xs uppercase tracking-wide text-zinc-500">
-                {probe.platform}
+          <div className="rise-in mt-4 space-y-4 rounded-xl border border-line bg-surface/60 p-4">
+            <div className="flex items-start gap-3">
+              <span
+                aria-hidden
+                className="mt-0.5 h-10 w-10 shrink-0 rounded-lg bg-gradient-to-br from-accent/20 to-accent-2/20 p-2 text-accent"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className="h-full w-full">
+                  <path d="M15 10l4.553-2.276A1 1 0 0 1 21 8.618v6.764a1 1 0 0 1-1.447.894L15 14M5 18h8a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2Z" />
+                </svg>
               </span>
+              <div className="min-w-0">
+                <p className="text-sm font-medium leading-snug text-ink">{probe.title}</p>
+                <span className="pill mt-1 bg-surface-3 text-ink-faint">{probe.platform}</span>
+              </div>
             </div>
             {probe.formats.length > 0 && (
               <label className="block text-sm">
-                <span className="mb-1 block text-xs text-zinc-500">Quality (default: best)</span>
-                <select
-                  value={formatId}
-                  onChange={(e) => setFormatId(e.target.value)}
-                  className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500"
-                >
+                <span className="mb-1.5 block text-xs text-ink-faint">Quality (default: best)</span>
+                <select value={formatId} onChange={(e) => setFormatId(e.target.value)} className="input">
                   <option value="">Best available</option>
                   {probe.formats.map((f) => (
                     <option key={f.format_id} value={f.format_id}>
@@ -155,85 +164,113 @@ export default function Queue() {
                 </select>
               </label>
             )}
-            <label className="flex items-center gap-2 text-sm text-zinc-300">
+            <label className="flex cursor-pointer items-center gap-2.5 text-sm text-ink-dim">
               <input
                 type="checkbox"
                 checked={audioOnly}
                 onChange={(e) => setAudioOnly(e.target.checked)}
+                className="h-4 w-4 accent-cyan-400"
               />
               Audio only (MP3/M4A)
             </label>
-            <div className="flex gap-2">
-              <button
-                onClick={() => start(false)}
-                disabled={busy}
-                className="rounded-md bg-white px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-zinc-200 disabled:opacity-50"
-              >
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <button onClick={() => start(false)} disabled={busy} className="btn-primary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-40">
                 Download
               </button>
-              <button
-                onClick={() => start(true)}
-                disabled={busy}
-                className="rounded-md border border-zinc-600 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
-              >
+              <button onClick={() => start(true)} disabled={busy} className="btn-secondary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm text-ink-dim disabled:cursor-not-allowed disabled:opacity-40">
                 Re-download (ignore duplicates)
               </button>
             </div>
           </div>
         )}
-        {error && <p className="mt-3 text-sm text-red-400">{error}</p>}
+        {error && (
+          <p role="alert" className="rise-in mt-3 text-sm text-bad">
+            {error}
+          </p>
+        )}
       </section>
 
       <section className="space-y-2">
-        <h2 className="text-sm font-medium text-zinc-400">Queue</h2>
-        {jobs.length === 0 && <p className="text-sm text-zinc-600">No downloads yet.</p>}
-        {jobs.map((job) => (
-          <div
-            key={job.id}
-            className="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3"
-          >
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <span className={`rounded px-1.5 py-0.5 text-[11px] uppercase ${STATUS_STYLES[job.status] ?? ""}`}>
-                  {job.status.replace("_", " ")}
-                </span>
-                <span className="truncate text-sm">{job.title ?? job.url}</span>
-              </div>
-              {(job.status === "downloading" || job.status === "paused") &&
-                (job.progress > 0 ? (
-                  <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
-                    <div
-                      className="h-full rounded-full bg-blue-500 transition-all"
-                      style={{ width: `${Math.min(100, job.progress)}%` }}
-                    />
-                  </div>
-                ) : (
-                  // No percent available (live stream): show captured size and
-                  // rate instead of a bar that would sit at 0 forever.
-                  <p className="mt-1 text-xs text-zinc-400">
-                    {fmtBytes(live[job.id]?.bytes)} captured
-                    {live[job.id]?.speed ? ` · ${fmtBytes(live[job.id]?.speed)}/s` : ""}
-                  </p>
-                ))}
-              {job.error && <p className="mt-1 text-xs text-red-400">{job.error}</p>}
-            </div>
-            <div className="flex shrink-0 gap-1">
-              {job.status === "downloading" && (
-                <button onClick={() => action(job, "pause")} className={btn}>Pause</button>
-              )}
-              {(job.status === "paused" || job.status === "paused_space_floor") && (
-                <button onClick={() => action(job, "resume")} className={btn}>Resume</button>
-              )}
-              {["queued", "probing", "downloading"].includes(job.status) && (
-                <button onClick={() => action(job, "cancel")} className={btnDanger}>Cancel</button>
-              )}
-              {(job.status === "failed" || (job.status as string) === "interrupted") && (
-                <button onClick={() => action(job, "retry")} className={btn}>Retry</button>
-              )}
-              <button onClick={() => setConfirming(job)} className={btnDanger}>Delete</button>
-            </div>
+        <h2 className="flex items-center gap-2 px-1 text-sm font-medium tracking-wide text-ink-dim uppercase">
+          <span aria-hidden className="h-4 w-1 rounded-full bg-gradient-to-b from-accent to-accent-2" />
+          Queue
+          {jobs.some((j) => ACTIVE_STATUSES.includes(j.status)) && (
+            <span className="dot-live ml-1 text-cyan-300" />
+          )}
+        </h2>
+        {jobs.length === 0 && (
+          <div className="card flex flex-col items-center gap-2 p-10 text-center">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden className="h-8 w-8 text-ink-faint">
+              <path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+            </svg>
+            <p className="text-sm text-ink-faint">No downloads yet.</p>
+            <p className="text-xs text-ink-faint/70">Paste a URL above to get started.</p>
           </div>
-        ))}
+        )}
+        <ul className="stagger space-y-2">
+          {jobs.map((job) => {
+            const active = ACTIVE_STATUSES.includes(job.status);
+            const liveInfo = live[job.id];
+            return (
+              <li key={job.id}>
+                <div className={`card p-4 ${active ? "card-hover" : ""}`}>
+                  <div className="flex items-center gap-3">
+                    <span className={`pill shrink-0 ${STATUS_STYLES[job.status] ?? ""}`}>
+                      {active && <span className="dot-live" />}
+                      {job.status.replace("_", " ")}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink" title={job.title ?? job.url}>
+                      {job.title ?? job.url}
+                    </span>
+                    {/* Actions: icon row on desktop, wraps under content on mobile */}
+                    <div className="hidden shrink-0 gap-1.5 sm:flex">
+                      <JobButtons job={job} onAction={action} onConfirm={() => setConfirming(job)} />
+                    </div>
+                  </div>
+
+                  {(active || job.status === "paused" || job.status === "paused_space_floor") &&
+                    (job.progress > 0 ? (
+                      <div className="progress-track mt-3 w-full">
+                        <div
+                          className={`progress-fill ${job.status !== "downloading" ? "opacity-50" : ""}`}
+                          style={{ width: `${Math.min(100, job.progress)}%` }}
+                        />
+                      </div>
+                    ) : active ? (
+                      // No percent available (live stream): sweep + captured size and rate
+                      <div className="mt-3 flex items-center gap-3">
+                        <div className="progress-track w-full">
+                          <div className="progress-fill progress-indeterminate" />
+                        </div>
+                        <p className="shrink-0 font-mono text-xs tabular-nums text-ink-dim">
+                          {fmtBytes(liveInfo?.bytes)}
+                          {liveInfo?.speed ? ` · ${fmtBytes(liveInfo.speed)}/s` : ""}
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="progress-track mt-3 w-full opacity-40">
+                        <div className="progress-fill" style={{ width: "0%" }} />
+                      </div>
+                    ))}
+                  {liveInfo?.speed && active && job.progress > 0 && (
+                    <p className="mt-1.5 font-mono text-xs tabular-nums text-ink-faint">
+                      {fmtBytes(liveInfo.speed)}/s · {fmtBytes(liveInfo.bytes)}
+                    </p>
+                  )}
+                  {job.error && (
+                    <p role="alert" className="mt-2 text-xs text-bad">
+                      {job.error}
+                    </p>
+                  )}
+
+                  <div className="mt-3 flex gap-1.5 sm:hidden">
+                    <JobButtons job={job} onAction={action} onConfirm={() => setConfirming(job)} />
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
       </section>
 
       {confirming && (
@@ -260,7 +297,37 @@ export default function Queue() {
   );
 }
 
-const btn =
-  "rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800";
-const btnDanger =
-  "rounded-md border border-red-900 px-2.5 py-1 text-xs text-red-300 hover:bg-red-950";
+function JobButtons({
+  job,
+  onAction,
+  onConfirm,
+}: {
+  job: DownloadJob;
+  onAction: (job: DownloadJob, act: "pause" | "resume" | "cancel" | "retry") => void;
+  onConfirm: () => void;
+}) {
+  const btn =
+    "min-h-[32px] cursor-pointer rounded-lg border border-line px-2.5 py-1 text-xs font-medium text-ink-dim transition-colors hover:border-ink-faint hover:bg-surface-3 hover:text-ink";
+  const btnDanger =
+    "min-h-[32px] cursor-pointer rounded-lg border border-bad/30 px-2.5 py-1 text-xs font-medium text-bad transition-colors hover:bg-bad/10";
+  return (
+    <>
+      {job.status === "downloading" && (
+        <button onClick={() => onAction(job, "pause")} className={btn}>Pause</button>
+      )}
+      {(job.status === "paused" || job.status === "paused_space_floor") && (
+        <button onClick={() => onAction(job, "resume")} className={btn}>Resume</button>
+      )}
+      {["queued", "probing", "downloading"].includes(job.status) && (
+        <button onClick={() => onAction(job, "cancel")} className={btnDanger}>Cancel</button>
+      )}
+      {(job.status === "failed" || (job.status as string) === "interrupted") && (
+        <button onClick={() => onAction(job, "retry")} className={btn}>Retry</button>
+      )}
+      <button onClick={onConfirm} className={btnDanger}>Delete</button>
+    </>
+  );
+}
+
+// ponytail: two render paths for action buttons (sm+ inline / mobile below-row)
+// instead of a responsive container query — revisit if a third breakpoint appears.

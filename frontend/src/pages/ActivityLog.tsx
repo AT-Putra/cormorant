@@ -3,12 +3,12 @@ import { api, type ActivityEntry } from "../api/client";
 
 const TYPE_COLORS: Record<string, string> = {
   "job.done": "text-emerald-400",
-  "job.failed": "text-red-400",
-  "job.skipped": "text-zinc-500",
-  "recording.started": "text-blue-400",
+  "job.failed": "text-bad",
+  "job.skipped": "text-ink-faint",
+  "recording.started": "text-cyan-300",
   finished: "text-emerald-400",
-  interrupted: "text-yellow-400",
-  "notification.suppressed": "text-zinc-600",
+  interrupted: "text-yellow-300",
+  "notification.suppressed": "text-ink-faint/70",
 };
 
 export default function ActivityLog() {
@@ -24,35 +24,41 @@ export default function ActivityLog() {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <input
           value={typeFilter}
           onChange={(e) => setTypeFilter(e.target.value)}
           placeholder="Filter by event type (e.g. job., recording.)"
-          className="w-80 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs outline-none focus:border-zinc-500"
+          aria-label="Filter by event type"
+          className="input w-full sm:w-80 sm:text-xs"
         />
-        <span className="text-xs text-zinc-600">{entries.length} entries</span>
+        <span className="pill bg-surface-3 text-ink-faint">{entries.length} entries</span>
       </div>
-      <div className="overflow-hidden rounded-lg border border-zinc-800">
+      <div className="card overflow-hidden">
         {entries.length === 0 && (
-          <p className="p-4 text-sm text-zinc-600">No activity recorded yet.</p>
+          <p className="p-6 text-sm text-ink-faint">No activity recorded yet.</p>
         )}
-        {entries.map((e) => (
-          <div
-            key={e.id}
-            className="flex items-baseline gap-3 border-b border-zinc-900 px-4 py-2 last:border-0"
-          >
-            <span className="shrink-0 font-mono text-[11px] text-zinc-600">
-              {new Date(e.ts.endsWith("Z") ? e.ts : e.ts + "Z").toLocaleString()}
-            </span>
-            <span
-              className={`shrink-0 font-mono text-[11px] ${TYPE_COLORS[e.event_type] ?? "text-zinc-400"}`}
+        <ul className="stagger">
+          {entries.map((e) => (
+            <li
+              key={e.id}
+              className="flex flex-col gap-1 border-b border-line/60 px-4 py-2.5 transition-colors last:border-0 hover:bg-surface-3/60 sm:flex-row sm:items-baseline sm:gap-3"
             >
-              {e.event_type}
-            </span>
-            <span className="truncate text-xs text-zinc-300">{e.message}</span>
-          </div>
-        ))}
+              <time
+                dateTime={e.ts}
+                className="shrink-0 font-mono text-[11px] tabular-nums text-ink-faint"
+              >
+                {new Date(e.ts.endsWith("Z") ? e.ts : e.ts + "Z").toLocaleString()}
+              </time>
+              <span
+                className={`shrink-0 font-mono text-[11px] ${TYPE_COLORS[e.event_type] ?? "text-ink-dim"}`}
+              >
+                {e.event_type}
+              </span>
+              <span className="min-w-0 break-words text-xs text-ink-dim">{e.message}</span>
+            </li>
+          ))}
+        </ul>
       </div>
     </div>
   );

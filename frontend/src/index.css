@@ -1,25 +1,288 @@
 @import "tailwindcss";
 
+/* ── Design tokens ───────────────────────────────────────────────────────
+   Ink surfaces + cyan→violet accent. Dark-first (the app is dark-only);
+   tokens exist so components never hardcode hex. */
+@theme {
+  --color-surface: #0b0d12;
+  --color-surface-2: #11141b;
+  --color-surface-3: #181c26;
+  --color-line: #232838;
+  --color-ink: #e7eaf2;
+  --color-ink-dim: #9aa3b5;
+  --color-ink-faint: #616a7d;
+  --color-accent: #22d3ee; /* cyan-400 */
+  --color-accent-2: #a78bfa; /* violet-400 */
+  --color-good: #34d399;
+  --color-warn: #fbbf24;
+  --color-bad: #fb7185;
+
+  --font-display:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-body: var(--font-display);
+}
+
+html {
+  font-family: var(--font-body);
+  background-color: var(--color-surface);
+  color-scheme: dark;
+}
+
+body {
+  /* Ambient glow: two fixed radial gradients behind everything, zero JS. */
+  background-image:
+    radial-gradient(60rem 40rem at 85% -10%, rgb(167 139 250 / 0.09), transparent 60%),
+    radial-gradient(50rem 35rem at -10% 110%, rgb(34 211 238 / 0.07), transparent 60%);
+  background-attachment: fixed;
+}
+
+::selection {
+  background: rgb(34 211 238 / 0.25);
+}
+
+/* Visible keyboard focus everywhere */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Thin scrollbars that match the ink theme */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line) transparent;
+}
+
+/* ── Motion ────────────────────────────────────────────────────────────── */
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
 @keyframes dialog-pop {
   from {
     opacity: 0;
     transform: translateY(8px) scale(0.97);
   }
 }
-@keyframes dialog-fade {
+@keyframes shimmer {
   from {
-    opacity: 0;
+    background-position: 200% 0;
   }
 }
+@keyframes pulse-live {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Page transition */
+.page {
+  animation: rise-in 0.28s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.rise-in {
+  animation: rise-in 0.25s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+/* Staggered entrance for cards/rows: add .stagger to a container */
+.stagger > * {
+  animation: rise-in 0.32s cubic-bezier(0.2, 0.8, 0.3, 1) backwards;
+}
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 40ms; }
+.stagger > *:nth-child(3) { animation-delay: 80ms; }
+.stagger > *:nth-child(4) { animation-delay: 120ms; }
+.stagger > *:nth-child(5) { animation-delay: 160ms; }
+.stagger > *:nth-child(n + 6) { animation-delay: 200ms; }
+
+/* Cards lift on hover; press feedback via scale, no layout shift */
+.card {
+  border-radius: 1rem;
+  border: 1px solid var(--color-line);
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--color-surface-2), white 2%),
+    var(--color-surface-2)
+  );
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease;
+}
+.card-hover:hover {
+  border-color: color-mix(in oklab, var(--color-accent), transparent 70%);
+  box-shadow: 0 8px 30px -12px rgb(34 211 238 / 0.15);
+  transform: translateY(-1px);
+}
+.card-hover:active {
+  transform: translateY(0) scale(0.995);
+}
+
+/* Gradient accent text */
+.grad-text {
+  background: linear-gradient(90deg, var(--color-accent), var(--color-accent-2));
+  background-clip: text;
+  color: transparent;
+}
+
+/* Primary button with animated gradient sheen */
+.btn-primary {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(120deg, var(--color-accent), var(--color-accent-2));
+  color: #0b0d12;
+  font-weight: 600;
+  transition:
+    filter 0.18s ease,
+    transform 0.12s ease,
+    box-shadow 0.18s ease;
+  box-shadow: 0 4px 20px -8px rgb(34 211 238 / 0.4);
+}
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  box-shadow: 0 6px 24px -8px rgb(167 139 250 / 0.45);
+}
+.btn-primary:active:not(:disabled) {
+  transform: scale(0.98);
+}
+.btn-primary::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 30%,
+    rgb(255 255 255 / 0.35) 50%,
+    transparent 70%
+  );
+  background-size: 200% 100%;
+  opacity: 0;
+  pointer-events: none;
+}
+.btn-primary:hover:not(:disabled)::after {
+  opacity: 1;
+  animation: shimmer 0.9s ease-out;
+}
+
+.btn-secondary {
+  border: 1px solid var(--color-line);
+  background: var(--color-surface-3);
+  transition:
+    border-color 0.18s ease,
+    background 0.18s ease,
+    transform 0.12s ease;
+}
+.btn-secondary:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--color-ink-dim), transparent 55%);
+  background: color-mix(in oklab, var(--color-surface-3), white 4%);
+}
+.btn-secondary:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+/* Inputs */
+.input {
+  width: 100%;
+  border-radius: 0.75rem;
+  border: 1px solid var(--color-line);
+  background: color-mix(in oklab, var(--color-surface), black 20%);
+  padding: 0.625rem 0.875rem;
+  font-size: 0.875rem;
+  color: var(--color-ink);
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
+}
+.input::placeholder {
+  color: var(--color-ink-faint);
+}
+.input:focus {
+  outline: none;
+  border-color: color-mix(in oklab, var(--color-accent), transparent 40%);
+  box-shadow: 0 0 0 3px rgb(34 211 238 / 0.12);
+}
+
+/* Status pill */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  border-radius: 999px;
+  padding: 0.125em 0.65em;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Live recording dot */
+.dot-live {
+  width: 0.5em;
+  height: 0.5em;
+  border-radius: 999px;
+  background: currentColor;
+  animation: pulse-live 1.4s ease-in-out infinite;
+}
+
+/* Progress bar: indeterminate sweep when percent is unknown */
+.progress-track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--color-line);
+}
+.progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--color-accent), var(--color-accent-2));
+  transition: width 0.4s ease-out;
+}
+.progress-indeterminate {
+  width: 40% !important;
+  animation: progress-slide 1.2s ease-in-out infinite;
+}
+@keyframes progress-slide {
+  0% {
+    margin-left: -40%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}
+
 dialog[open] {
   animation: dialog-pop 0.15s ease-out;
 }
 dialog[open]::backdrop {
-  animation: dialog-fade 0.15s ease-out;
+  animation: fade-in 0.15s ease-out;
+  backdrop-filter: blur(4px);
 }
+
 @media (prefers-reduced-motion: reduce) {
+  .page,
+  .rise-in,
+  .stagger > *,
+  .dot-live,
+  .progress-indeterminate,
+  .btn-primary:hover:not(:disabled)::after,
   dialog[open],
   dialog[open]::backdrop {
     animation: none;
+  }
+  .card-hover:hover,
+  .card-hover:active,
+  .btn-secondary:active,
+  .btn-primary:active {
+    transform: none;
+  }
+  html {
+    scroll-behavior: auto;
   }
 }

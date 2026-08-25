@@ -31,32 +31,32 @@ export default function ConfirmDialog({
       // A click landing on the dialog box itself is a click on the backdrop;
       // inner content stops at its own subtree.
       onClick={(e) => e.target === ref.current && onCancel()}
-      className="w-[min(26rem,calc(100vw-2rem))] rounded-xl border border-zinc-800 bg-zinc-900 p-0 text-zinc-100 shadow-2xl backdrop:bg-black/70"
+      className="w-[min(26rem,calc(100vw-2rem))] rounded-2xl border border-line bg-surface-2 p-0 text-ink shadow-2xl shadow-black/50 backdrop:bg-black/70"
     >
-      <div className="p-5">
+      <div className="p-5 sm:p-6">
         <div className="flex gap-3">
           <span
             aria-hidden
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-red-950 text-lg text-red-400"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-bad/40 bg-bad/15 text-base text-bad"
           >
             !
           </span>
           <div className="min-w-0">
             <h2 className="text-sm font-semibold">{title}</h2>
-            <div className="mt-1 text-sm break-words text-zinc-400">{message}</div>
+            <div className="mt-1 text-sm break-words text-ink-dim">{message}</div>
           </div>
         </div>
         <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <button
             onClick={onCancel}
-            className="rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
+            className="btn-secondary min-h-[44px] cursor-pointer rounded-xl px-4 py-2.5 text-sm text-ink-dim"
           >
             Cancel
           </button>
           <button
             autoFocus
             onClick={onConfirm}
-            className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500"
+            className="min-h-[44px] cursor-pointer rounded-xl bg-bad px-4 py-2.5 text-sm font-semibold text-white transition-[filter,transform] hover:brightness-110 active:scale-[0.98]"
           >
             {confirmLabel}
           </button>

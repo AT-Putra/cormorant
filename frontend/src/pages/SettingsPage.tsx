@@ -97,99 +97,121 @@ export default function SettingsPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="stagger space-y-6">
       {message && (
-        <p className="rounded-md border border-emerald-900 bg-emerald-950 px-3 py-2 text-sm text-emerald-300">
+        <p
+          role="status"
+          className="rise-in rounded-xl border border-emerald-500/30 bg-emerald-950/40 px-4 py-2.5 text-sm text-emerald-300"
+        >
           {message}
         </p>
       )}
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      {error && (
+        <p role="alert" className="rise-in rounded-xl border border-bad/30 bg-bad/10 px-4 py-2.5 text-sm text-bad">
+          {error}
+        </p>
+      )}
 
       {/* Downloads settings */}
       {settings && (
-        <section className="space-y-4 rounded-xl border border-zinc-800 bg-zinc-900 p-5">
-          <h2 className="text-sm font-medium text-zinc-400">Downloads</h2>
-          <Field label="Folder template">
-            <input
-              defaultValue={settings.folder_template}
-              onBlur={(e) =>
-                e.target.value !== settings.folder_template && save({ folder_template: e.target.value })
-              }
-              className={input}
-            />
-          </Field>
-          <div className="grid grid-cols-2 gap-4">
-            <Field label={`Concurrency cap (${settings.concurrency_cap})`}>
+        <section className="card p-5 sm:p-6">
+          <h2 className="mb-4 flex items-center gap-2 text-sm font-medium tracking-wide text-ink-dim uppercase">
+            <span aria-hidden className="h-4 w-1 rounded-full bg-gradient-to-b from-accent to-accent-2" />
+            Downloads
+          </h2>
+          <div className="space-y-4">
+            <Field label="Folder template">
               <input
-                type="range"
-                min={1}
-                max={8}
-                defaultValue={settings.concurrency_cap}
-                onMouseUp={(e) => save({ concurrency_cap: +(e.target as HTMLInputElement).value })}
-                onTouchEnd={(e) => save({ concurrency_cap: +(e.target as HTMLInputElement).value })}
-                className="w-full"
+                defaultValue={settings.folder_template}
+                onBlur={(e) =>
+                  e.target.value !== settings.folder_template && save({ folder_template: e.target.value })
+                }
+                className="input"
               />
             </Field>
-            <Field label="Space floor %">
-              <input
-                type="number"
-                min={0}
-                max={50}
-                defaultValue={settings.space_floor_pct}
-                onBlur={(e) => save({ space_floor_pct: +e.target.value })}
-                className={input}
-              />
-            </Field>
-            <Field label="Poll interval (seconds)">
-              <input
-                type="number"
-                min={60}
-                defaultValue={settings.poll_interval_seconds}
-                onBlur={(e) => save({ poll_interval_seconds: +e.target.value })}
-                className={input}
-              />
-            </Field>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <Field label={`Concurrency cap (${settings.concurrency_cap})`}>
+                <input
+                  type="range"
+                  min={1}
+                  max={8}
+                  defaultValue={settings.concurrency_cap}
+                  onMouseUp={(e) => save({ concurrency_cap: +(e.target as HTMLInputElement).value })}
+                  onTouchEnd={(e) => save({ concurrency_cap: +(e.target as HTMLInputElement).value })}
+                  className="w-full accent-cyan-400"
+                />
+              </Field>
+              <Field label="Space floor %">
+                <input
+                  type="number"
+                  min={0}
+                  max={50}
+                  defaultValue={settings.space_floor_pct}
+                  onBlur={(e) => save({ space_floor_pct: +e.target.value })}
+                  className="input"
+                />
+              </Field>
+              <Field label="Poll interval (seconds)">
+                <input
+                  type="number"
+                  min={60}
+                  defaultValue={settings.poll_interval_seconds}
+                  onBlur={(e) => save({ poll_interval_seconds: +e.target.value })}
+                  className="input"
+                />
+              </Field>
+            </div>
           </div>
         </section>
       )}
 
       {/* Platform credentials */}
-      <section className="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
-        <h2 className="mb-3 text-sm font-medium text-zinc-400">
+      <section className="card p-5 sm:p-6">
+        <h2 className="mb-1 flex items-center gap-2 text-sm font-medium tracking-wide text-ink-dim uppercase">
+          <span aria-hidden className="h-4 w-1 rounded-full bg-gradient-to-b from-accent to-accent-2" />
           Platform cookies (unlock max quality)
         </h2>
-        <div className="flex flex-wrap gap-2">
+        <div className="mt-4 flex flex-wrap gap-2">
           {PLATFORMS.map((p) => {
             const cred = creds.find((c) => c.platform === p);
             return (
               <button
                 key={p}
                 onClick={() => setCookiePlatform(p)}
-                className={`rounded-md border px-3 py-1.5 text-xs ${
+                aria-label={`${p} cookies${cred ? " — configured" : " — not configured"}`}
+                className={`flex min-h-[36px] cursor-pointer items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium capitalize transition-all ${
                   cred
-                    ? "border-emerald-800 text-emerald-300"
-                    : "border-zinc-700 text-zinc-400 hover:text-white"
+                    ? "border border-emerald-500/40 bg-emerald-950/40 text-emerald-300"
+                    : "border border-line bg-surface-2 text-ink-faint hover:border-ink-faint/50 hover:text-ink-dim"
                 }`}
               >
-                {p} {cred ? "✓" : ""}
+                {cred && (
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden className="h-3 w-3">
+                    <path d="M20 6 9 17l-5-5" />
+                  </svg>
+                )}
+                {p}
               </button>
             );
           })}
         </div>
-        <p className="mt-2 text-xs text-zinc-600">
+        <p className="mt-3 text-xs text-ink-faint">
           Click a platform to paste exported cookies (or a cookies.txt file's contents). Encrypted at rest.
         </p>
       </section>
 
       {/* Notifications */}
-      <section className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900 p-5">
-        <h2 className="text-sm font-medium text-zinc-400">Notifications</h2>
-        <div className="grid grid-cols-2 gap-3">
+      <section className="card p-5 sm:p-6">
+        <h2 className="mb-4 flex items-center gap-2 text-sm font-medium tracking-wide text-ink-dim uppercase">
+          <span aria-hidden className="h-4 w-1 rounded-full bg-gradient-to-b from-accent to-accent-2" />
+          Notifications
+        </h2>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Field label="Channel">
             <select
               value={notif.channel_type}
               onChange={(e) => setNotif({ ...notif, channel_type: e.target.value })}
-              className={input}
+              className="input"
             >
               <option value="ntfy">ntfy</option>
               <option value="telegram">Telegram</option>
@@ -201,7 +223,7 @@ export default function SettingsPage() {
               value={notif.target}
               onChange={(e) => setNotif({ ...notif, target: e.target.value })}
               placeholder={notif.configured ? "(configured — leave empty to keep)" : ""}
-              className={input}
+              className="input"
             />
           </Field>
           <Field label="Token (Telegram bot / webhook)">
@@ -209,8 +231,9 @@ export default function SettingsPage() {
               value={notif.token}
               onChange={(e) => setNotif({ ...notif, token: e.target.value })}
               type="password"
+              autoComplete="off"
               placeholder={notif.configured ? "(stored)" : ""}
-              className={input}
+              className="input"
             />
           </Field>
           <Field label="Quiet hours (start–end HH:MM)">
@@ -219,18 +242,18 @@ export default function SettingsPage() {
                 value={notif.quiet_hours_start}
                 onChange={(e) => setNotif({ ...notif, quiet_hours_start: e.target.value })}
                 placeholder="23:00"
-                className={input}
+                className="input"
               />
               <input
                 value={notif.quiet_hours_end}
                 onChange={(e) => setNotif({ ...notif, quiet_hours_end: e.target.value })}
                 placeholder="07:00"
-                className={input}
+                className="input"
               />
             </div>
           </Field>
         </div>
-        <div className="flex gap-2">
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row">
           <button
             onClick={async () => {
               try {
@@ -247,7 +270,7 @@ export default function SettingsPage() {
                 setError(err instanceof Error ? err.message : "Save failed");
               }
             }}
-            className={btnPrimary}
+            className="btn-primary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm disabled:opacity-40"
           >
             Save notifications
           </button>
@@ -260,7 +283,7 @@ export default function SettingsPage() {
                 setError(err instanceof Error ? err.message : "Test failed");
               }
             }}
-            className={btnSecondary}
+            className="btn-secondary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm text-ink-dim disabled:opacity-40"
           >
             Send test
           </button>
@@ -268,34 +291,48 @@ export default function SettingsPage() {
       </section>
 
       {/* yt-dlp engine */}
-      <section className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900 p-5">
+      <section className="card flex flex-wrap items-center justify-between gap-3 p-5 sm:p-6">
         <div>
-          <h2 className="text-sm font-medium text-zinc-400">Engine</h2>
-          <p className="mt-1 font-mono text-xs text-zinc-500">yt-dlp {ytdlp}</p>
+          <h2 className="flex items-center gap-2 text-sm font-medium tracking-wide text-ink-dim uppercase">
+            <span aria-hidden className="h-4 w-1 rounded-full bg-gradient-to-b from-accent to-accent-2" />
+            Engine
+          </h2>
+          <p className="mt-1.5 pl-3 font-mono text-xs tabular-nums text-ink-faint">yt-dlp {ytdlp}</p>
         </div>
-        <button onClick={updateYtdlp} className={btnPrimary}>
+        <button onClick={updateYtdlp} className="btn-secondary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm text-ink disabled:opacity-40">
           Update now
         </button>
       </section>
 
       {/* Cookie modal */}
       {cookiePlatform && (
-        <div className="fixed inset-0 flex items-center justify-center bg-black/70 p-6" onClick={() => setCookiePlatform(null)}>
-          <div className="w-full max-w-lg space-y-3 rounded-xl border border-zinc-700 bg-zinc-900 p-5" onClick={(e) => e.stopPropagation()}>
-            <h3 className="font-medium capitalize">{cookiePlatform} cookies</h3>
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${cookiePlatform} cookies`}
+          className="rise-in fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm sm:p-6"
+          onClick={() => setCookiePlatform(null)}
+        >
+          <div
+            className="card rise-in w-full max-w-lg space-y-4 p-5 shadow-2xl shadow-black/50"
+            style={{ animationDuration: "0.35s" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-base font-semibold capitalize text-ink">{cookiePlatform} cookies</h3>
             <textarea
               value={cookieText}
               onChange={(e) => setCookieText(e.target.value)}
               rows={10}
+              aria-label="Cookie text"
               placeholder="Paste cookie text here (Netscape cookies.txt format or raw header)"
-              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-xs outline-none focus:border-zinc-500"
+              className="input resize-y font-mono text-xs"
             />
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setCookiePlatform(null)} className={btnSecondary}>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button onClick={() => setCookiePlatform(null)} className="btn-secondary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm text-ink-dim">
                 Cancel
               </button>
-              <button onClick={saveCookies} disabled={!cookieText.trim()} className={btnPrimary}>
-                Save & validate
+              <button onClick={saveCookies} disabled={!cookieText.trim()} className="btn-primary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-40">
+                Save &amp; validate
               </button>
             </div>
           </div>
@@ -305,17 +342,10 @@ export default function SettingsPage() {
   );
 }
 
-const input =
-  "w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none focus:border-zinc-500";
-const btnPrimary =
-  "rounded-md bg-white px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-zinc-200 disabled:opacity-50";
-const btnSecondary =
-  "rounded-md border border-zinc-600 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50";
-
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="block text-xs text-zinc-500">
-      <span className="mb-1 block">{label}</span>
+    <label className="block text-xs text-ink-faint">
+      <span className="mb-1.5 block">{label}</span>
       {children}
     </label>
   );
