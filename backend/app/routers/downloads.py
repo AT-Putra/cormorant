@@ -16,6 +16,7 @@ from app.db import get_session
 from app.models import DownloadJob
 from app.routers.credentials import aget_cookiefile
 from app.services import ytdlp
+from app.services.settings_store import aget_settings
 from app.services.downloader import TERMINAL, manager
 from app.util.platform import detect_platform
 
@@ -132,6 +133,9 @@ async def create_download(
         title=title,
         creator=creator,
         format_id=body.format_id,
+        # Snapshot the account default the way the poller does: a later
+        # Settings change must not retroactively re-aim a queued job.
+        selected_quality=(await aget_settings(session)).default_quality,
         status="queued",
         is_auto=False,
         redownload_requested=body.redownload,

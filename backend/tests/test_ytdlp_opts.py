@@ -8,7 +8,7 @@ what the Library uses instead.
 
 from types import SimpleNamespace
 
-from app.services.ytdlp import build_opts
+from app.services.ytdlp import QUALITY_CHOICES, build_opts, quality_sort
 
 
 def _job(**kw):
@@ -34,3 +34,52 @@ def test_audio_extract_pp_survives():
     opts = build_opts(job, {"audio": "mp3"})
     keys = [p["key"] for p in opts.get("postprocessors", [])]
     assert "FFmpegExtractAudio" in keys
+
+
+# ---- default_quality -> resolution cap ---------------------------------------
+
+
+def test_best_applies_no_cap():
+    for q in (None, "", "best"):
+        assert quality_sort(q) is None
+        assert "format_sort" not in build_opts(_job(selected_quality=q))
+
+
+def test_cap_uses_res_sort_not_a_height_filter():
+    """The cap MUST be format_sort. These platforms serve vertical video, so
+    `height<=1080` on a 1080x1920 ladder drops to 480x852 — yt-dlp's `res`
+    reads the smaller dimension and lands on the tier a person means."""
+    opts = build_opts(_job(selected_quality="1080p"))
+    assert opts["format_sort"] == ["res:1080"]
+    assert "height" not in opts["format"]
+
+
+def test_every_offered_choice_maps():
+    for q in QUALITY_CHOICES:
+        sort = quality_sort(q)
+        assert sort is None if q == "best" else sort == [f"res:{q[:-1]}"]
+
+
+def test_explicit_format_id_beats_the_default_cap():
+    """A quality picked in the dropdown names the exact stream; a cap on top
+    could only fight it."""
+    opts = build_opts(_job(format_id="100028", selected_quality="360p"))
+    assert opts["format"] == "100028"
+    assert "format_sort" not in opts
+
+
+def test_settings_default_applies_when_job_has_no_snapshot():
+    opts = build_opts(_job(), {"default_quality": "720p"})
+    assert opts["format_sort"] == ["res:720"]
+
+
+def test_job_snapshot_beats_live_setting():
+    """selected_quality is stamped at queue time so changing Settings does
+    not re-aim jobs already in the queue."""
+    opts = build_opts(_job(selected_quality="480p"), {"default_quality": "2160p"})
+    assert opts["format_sort"] == ["res:480"]
+
+
+def test_garbage_quality_is_ignored_not_crashed():
+    assert quality_sort("potato") is None
+    assert "format_sort" not in build_opts(_job(selected_quality="potato"))

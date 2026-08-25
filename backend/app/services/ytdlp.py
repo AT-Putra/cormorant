@@ -22,6 +22,24 @@ class AbortDownload(Exception):
     """
 
 
+# A resolution cap goes through format_sort, NEVER through a format filter.
+# These platforms serve vertical video: bilibili reports 1080p as 1080x1920,
+# so `bestvideo*[height<=1080]` throws away the whole 1080p AND 720p ladder
+# and silently lands on 480x852 — measured, not theorised. yt-dlp's `res`
+# sort field uses the smaller dimension, so it reads 1080x1920 as 1080 the
+# way a person does. Ties below the cap fall through to yt-dlp's own order
+# (quality, fps, codec), which is what "best 1080p" should mean.
+QUALITY_CHOICES = ("best", "2160p", "1440p", "1080p", "720p", "480p", "360p")
+
+
+def quality_sort(quality: str | None) -> list[str] | None:
+    """format_sort fields capping resolution, or None for 'best'/unset."""
+    if not quality or quality == "best":
+        return None
+    digits = quality.removesuffix("p")
+    return [f"res:{digits}"] if digits.isdigit() else None
+
+
 def _sanitize(component: str) -> str:
     return component.strip().replace("/", "_").replace("\\", "_") or "_"
 
@@ -82,6 +100,14 @@ def build_opts(job, settings: dict | None = None, *, extra: dict | None = None) 
         opts.setdefault("postprocessors", []).insert(
             0, {"key": "FFmpegExtractAudio", "preferredcodec": audio}
         )
+    # An explicit per-job format_id already names the exact stream to fetch,
+    # so a cap on top could only fight it; the dropdown wins over the default.
+    if not getattr(job, "format_id", None):
+        sort = quality_sort(
+            getattr(job, "selected_quality", None) or s.get("default_quality")
+        )
+        if sort:
+            opts["format_sort"] = sort
     if extra:
         opts.update(extra)
     return opts

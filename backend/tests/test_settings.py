@@ -35,9 +35,22 @@ def test_put_invalid_rejected(authed_client):
         {"space_floor_pct": 90},
         {"folder_template": ""},
         {"bogus_key": 1},
+        {"default_quality": "1080"},   # missing the 'p'
+        {"default_quality": "potato"},
     ):
         r = client.put("/api/settings", json=bad)
         assert r.status_code == 422, f"{bad} should be rejected"
+
+
+def test_default_quality_round_trips(authed_client):
+    """The dropdown's value has to survive a save; a silent reset would put
+    the UI and the format selector out of step."""
+    client, _ = authed_client
+    assert client.get("/api/settings").json()["default_quality"] == "best"
+    r = client.put("/api/settings", json={"default_quality": "1080p"})
+    assert r.status_code == 200, r.text
+    assert r.json()["settings"]["default_quality"] == "1080p"
+    assert client.get("/api/settings").json()["default_quality"] == "1080p"
 
 
 def test_store_level_persistence(authed_client):

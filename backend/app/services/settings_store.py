@@ -6,6 +6,7 @@ from dataclasses import dataclass, asdict, fields
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AppSetting
+from app.services.ytdlp import QUALITY_CHOICES
 
 
 @dataclass
@@ -68,5 +69,7 @@ def _validate(s: dict) -> None:
         errors.append("space_floor_pct must be 0..50")
     if not s["folder_template"]:
         errors.append("folder_template must not be empty")
+    if s["default_quality"] not in QUALITY_CHOICES:
+        errors.append(f"default_quality must be one of {', '.join(QUALITY_CHOICES)}")
     if errors:
         raise ValueError("; ".join(errors))
