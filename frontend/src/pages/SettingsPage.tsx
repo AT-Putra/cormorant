@@ -3,6 +3,10 @@ import { api, type AppSettings, type CredentialInfo } from "../api/client";
 
 const PLATFORMS = ["bilibili", "instagram", "tiktok", "douyin", "xhs"] as const;
 
+// Mirrors QUALITY_CHOICES in backend/app/services/ytdlp.py — the PUT is
+// rejected with 422 if these drift apart.
+const QUALITY_CHOICES = ["best", "2160p", "1440p", "1080p", "720p", "480p", "360p"];
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [creds, setCreds] = useState<CredentialInfo[]>([]);
@@ -155,16 +159,26 @@ export default function SettingsPage() {
                 className="input"
               />
             </Field>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              <Field label={`Concurrency cap (${settings.concurrency_cap})`}>
-                <input
-                  type="range"
-                  min={1}
-                  max={8}
-                  defaultValue={settings.concurrency_cap}
-                  onMouseUp={(e) => save({ concurrency_cap: +(e.target as HTMLInputElement).value })}
-                  onTouchEnd={(e) => save({ concurrency_cap: +(e.target as HTMLInputElement).value })}
-                  className="w-full accent-cyan-400"
+            {/* 4 fields: stack on phones, 2x2 on tablets, one row on desktop
+                so no breakpoint leaves a lone orphan on its own line. */}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <Field label="Default quality">
+                <select
+                  value={settings.default_quality}
+                  onChange={(e) => save({ default_quality: e.target.value })}
+                  className="input"
+                >
+                  {QUALITY_CHOICES.map((q) => (
+                    <option key={q} value={q}>
+                      {q === "best" ? "Best available" : q}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Concurrency cap">
+                <ConcurrencySlider
+                  value={settings.concurrency_cap}
+                  onCommit={(v) => save({ concurrency_cap: v })}
                 />
               </Field>
               <Field label="Space floor %">
@@ -420,6 +434,49 @@ export default function SettingsPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+const CONCURRENCY_MIN = 1;
+const CONCURRENCY_MAX = 8;
+
+/** Slider in an input-sized shell, so it lines up with the number fields
+ *  sharing its grid row. Drag updates the readout locally; only the released
+ *  value is saved. */
+function ConcurrencySlider({ value, onCommit }: { value: number; onCommit: (v: number) => void }) {
+  const [draft, setDraft] = useState(value);
+  // A save that fails leaves `value` unchanged, so snap the draft back to it
+  // rather than letting the readout keep showing a number that was not stored.
+  // Adjusting during render (not in an effect) skips the extra paint.
+  const [lastSaved, setLastSaved] = useState(value);
+  if (lastSaved !== value) {
+    setLastSaved(value);
+    setDraft(value);
+  }
+
+  const pct = ((draft - CONCURRENCY_MIN) / (CONCURRENCY_MAX - CONCURRENCY_MIN)) * 100;
+
+  return (
+    <div className="input range-box">
+      <input
+        type="range"
+        min={CONCURRENCY_MIN}
+        max={CONCURRENCY_MAX}
+        value={draft}
+        onChange={(e) => setDraft(+e.target.value)}
+        onMouseUp={() => draft !== value && onCommit(draft)}
+        onTouchEnd={() => draft !== value && onCommit(draft)}
+        onKeyUp={() => draft !== value && onCommit(draft)}
+        style={{ "--range-pct": `${pct}%` } as React.CSSProperties}
+        className="range min-w-0 flex-1"
+      />
+      {/* No text-size utility: the readout inherits .input's font-size and its
+          `normal` line box, which is what keeps the shell the same height as a
+          text field. */}
+      <span aria-hidden className="w-3 shrink-0 text-right tabular-nums text-ink">
+        {draft}
+      </span>
     </div>
   );
 }
