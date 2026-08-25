@@ -69,7 +69,20 @@ async def _validate_cookie_text(platform: str, cookie_text: str) -> None:
     tmp.close()
     try:
         try:
-            await asyncio.to_thread(ytdlp.probe, _PROBE_URLS[platform], tmp.name)
+            # Flat + capped, never a full extraction. Several probe targets
+            # are profiles, and extracting one meant pulling every video on
+            # them: TikTok's @tiktok took 61s and then died on whichever clip
+            # happened to sit at the top of the feed ("Unexpected response
+            # from webpage request"), failing a cookie save for a reason that
+            # had nothing to do with the cookies. Flat alone still paged 1454
+            # entries in 58s, so the item cap is load-bearing, not a nicety.
+            await asyncio.to_thread(
+                ytdlp.probe,
+                _PROBE_URLS[platform],
+                tmp.name,
+                extract_flat=True,
+                playlist_items="1-3",
+            )
         except Exception as exc:
             if _is_auth_error(exc):
                 raise HTTPException(status_code=400, detail=f"Cookie validation failed: {exc}")

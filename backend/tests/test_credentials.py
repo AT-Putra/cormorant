@@ -35,7 +35,15 @@ def crypto_tmp(tmp_path, monkeypatch):
 
 
 class ProbeOk:
-    def __call__(self, url, cookiefile=None):
+    """Records how it was called: the validation probe must stay flat and
+    capped, so a regression to full extraction is caught here rather than by
+    a 60s hang on a real profile URL."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def __call__(self, url, cookiefile=None, **kw):
+        self.calls.append({"url": url, **kw})
         return {"id": "x"}
 
 
@@ -43,7 +51,7 @@ class ProbeAuthError(Exception):
     pass
 
 
-def _authed_probe_fail(url, cookiefile=None):
+def _authed_probe_fail(url, cookiefile=None, **kw):
     raise RuntimeError("This video is only available to registered members; please log in")
 
 
@@ -137,3 +145,21 @@ def test_unknown_platform_404(authed_client, crypto_tmp):
     client, _stub = authed_client
     r = client.post("/api/credentials/youtube", json={"cookie_text": "c=3"})
     assert r.status_code == 404
+
+
+def test_validation_probe_is_flat_and_capped(authed_client, crypto_tmp, monkeypatch):
+    """Several probe targets are profiles. Extracting one pulls every video on
+    it — TikTok's took 61s and then failed on whichever clip topped the feed,
+    rejecting a cookie save for a reason unrelated to the cookies."""
+    client, _stub = authed_client
+    probe = ProbeOk()
+    monkeypatch.setattr(cred_mod.ytdlp, "probe", probe)
+
+    r = client.post("/api/credentials/tiktok", json={"cookie_text": "sessionid=abc"})
+    assert r.status_code == 200, r.text
+
+    assert len(probe.calls) == 1
+    call = probe.calls[0]
+    assert call["extract_flat"] is True
+    # Flat alone still paged 1454 entries in 58s; the cap is load-bearing.
+    assert call["playlist_items"] == "1-3"
