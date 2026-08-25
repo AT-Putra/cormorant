@@ -63,7 +63,11 @@ def build_opts(job, settings: dict | None = None, *, extra: dict | None = None) 
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,  # hooks still fire
-        "postprocessors": [{"key": "EmbedThumbnail", "already_have_thumbnail": True}],
+        # ponytail: no EmbedThumbnail PP — it hard-crashes post-download when
+        # the output container is FLV (bilibili live captures), failing a
+        # finished job. writethumbnail keeps the sidecar .jpg which the
+        # Library uses directly. Re-add per-container embedding only if
+        # cover art inside files becomes a requirement.
     }
     if getattr(job, "kind", "") == "images":
         opts["skip_download"] = True
@@ -75,7 +79,7 @@ def build_opts(job, settings: dict | None = None, *, extra: dict | None = None) 
         opts["convertsubtitles"] = "srt"
     audio = s.get("audio")
     if audio:
-        opts["postprocessors"].insert(
+        opts.setdefault("postprocessors", []).insert(
             0, {"key": "FFmpegExtractAudio", "preferredcodec": audio}
         )
     if extra:

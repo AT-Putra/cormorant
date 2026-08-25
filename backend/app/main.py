@@ -23,6 +23,7 @@ from app.routers import (
 )
 from app.services.downloader import manager
 from app.services.poller import poller
+from app.services.recovery import recovery
 from app.services.recorder import recorder
 
 
@@ -38,10 +39,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     activity_service.install()
     await manager.start()
     await poller.start()
+    await recovery.start()
     await recorder.reconcile_on_boot()
     yield
     await recorder.shutdown()
     await poller.stop()
+    await recovery.stop()
     await manager.stop()
 
 
