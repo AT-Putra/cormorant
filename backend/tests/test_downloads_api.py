@@ -54,6 +54,36 @@ def test_probe_filters_and_sorts_formats(client, monkeypatch):
     f137 = next(f for f in data["formats"] if f["format_id"] == "137")
     assert f137["filesize_approx"] == 10_485_760
     assert data["formats"][0]["tbr"] == 4500
+    # Codec/fps/bitrate reach the client: the quality dropdown labels entries
+    # with them, so two same-resolution formats are told apart by codec.
+    assert (f137["vcodec"], f137["acodec"], f137["fps"]) == ("avc1.640028", "none", 30)
+
+
+def _live_probe_info():
+    """Bilibili live: no resolution, fps or tbr — the tier note and protocol
+    are the only things separating four otherwise identical entries."""
+    return {
+        "title": "Live Room",
+        "formats": [
+            {"format_id": "source-0", "ext": "fmp4", "vcodec": "avc",
+             "protocol": "m3u8_native", "format_note": "原画"},
+            {"format_id": "source-2", "ext": "flv", "vcodec": "avc",
+             "protocol": "https", "format_note": "原画"},
+        ],
+    }
+
+
+def test_probe_keeps_live_formats_with_tier_and_protocol(client, monkeypatch):
+    c, _stub, dl = client
+    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None: _live_probe_info())
+
+    r = c.post("/api/downloads/probe", json={"url": "https://live.bilibili.com/23630605"})
+    assert r.status_code == 200
+    fmts = r.json()["formats"]
+    # No tbr means the sub-200kbit filter must not swallow them.
+    assert [f["format_id"] for f in fmts] == ["source-0", "source-2"]
+    assert all(f["format_note"] == "原画" for f in fmts)
+    assert [f["protocol"] for f in fmts] == ["m3u8_native", "https"]
 
 
 def test_probe_invalid_url_400(client):

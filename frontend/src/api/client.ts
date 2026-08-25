@@ -19,6 +19,8 @@ export interface QualityOption {
   acodec?: string | null;
   filesize_approx?: number | null;
   tbr?: number | null;
+  format_note?: string | null;
+  protocol?: string | null;
 }
 
 export interface ProbeResult {

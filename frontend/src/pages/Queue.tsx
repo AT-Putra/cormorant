@@ -1,11 +1,97 @@
 import { useEffect, useRef, useState } from "react";
-import { api, openEventSocket, type DownloadJob, type ProbeResult } from "../api/client";
+import {
+  api,
+  openEventSocket,
+  type DownloadJob,
+  type ProbeResult,
+  type QualityOption,
+} from "../api/client";
 import ConfirmDialog from "../components/ConfirmDialog";
 
 function fmtBytes(n: number | null | undefined): string {
   if (!n || n <= 0) return "0 MB";
   const mb = n / 1e6;
   return mb >= 1000 ? `${(mb / 1000).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
+}
+
+// Codec ids arrive as full RFC 6381 strings (av01.0.09M.08, hvc1.1.6.L150) —
+// unreadable in a dropdown, so map the family prefix to the name people use.
+const VCODEC_NAMES: [RegExp, string][] = [
+  [/^av0?1/, "AV1"],
+  [/^(hev1|hvc1|h\.?265|hevc)/, "H.265"],
+  [/^(avc1|avc3|avc|h\.?264)/, "H.264"],
+  [/^vp0?9/, "VP9"],
+  [/^vp0?8/, "VP8"],
+];
+const ACODEC_NAMES: [RegExp, string][] = [
+  [/^mp4a/, "AAC"],
+  [/^opus/, "Opus"],
+  [/^(ec-3|eac3)/, "E-AC3"],
+  [/^ac-3/, "AC3"],
+  [/^flac/, "FLAC"],
+  [/^mp3/, "MP3"],
+];
+// Live rooms label tiers in Chinese only. Keep the original alongside the
+// translation so the entry still matches what the bilibili player shows.
+const NOTE_NAMES: Record<string, string> = {
+  "原画": "Source (原画)",
+  "蓝光": "Blu-ray (蓝光)",
+  "超清": "Ultra HD (超清)",
+  "高清": "HD (高清)",
+  "流畅": "Smooth (流畅)",
+};
+const PROTOCOL_NAMES: Record<string, string> = {
+  m3u8_native: "HLS",
+  m3u8: "HLS",
+  http_dash_segments: "DASH",
+  https: "HTTPS",
+  http: "HTTP",
+  rtmp: "RTMP",
+};
+
+function codecName(raw: string | null | undefined, table: [RegExp, string][]): string | null {
+  if (!raw || raw === "none") return null;
+  const hit = table.find(([re]) => re.test(raw));
+  return hit ? hit[1] : raw.split(".")[0];
+}
+
+function qualityLabel(f: QualityOption): string {
+  const parts: string[] = [];
+  const vcodec = codecName(f.vcodec, VCODEC_NAMES);
+  const acodec = codecName(f.acodec, ACODEC_NAMES);
+
+  if (f.resolution && f.resolution !== "audio only") parts.push(f.resolution);
+  else if (!vcodec) parts.push("Audio only");
+  if (f.fps) parts.push(`${Math.round(f.fps)}fps`);
+  // Live has no resolution/fps/bitrate at all; the tier note is the only
+  // thing that says how good the stream is, so it leads there.
+  const note = f.format_note?.trim();
+  if (note && !f.resolution) parts.push(NOTE_NAMES[note] ?? note);
+  if (vcodec) parts.push(vcodec);
+  if (acodec) parts.push(acodec);
+  if (f.tbr) parts.push(`${Math.round(f.tbr)}k`);
+  if (f.ext) parts.push(f.ext === "fmp4" ? "fMP4" : f.ext.toUpperCase());
+  // Protocol only earns a slot when it distinguishes otherwise-identical
+  // entries — i.e. the live case, where plain https means an FLV pull.
+  if (!f.resolution && f.protocol) parts.push(PROTOCOL_NAMES[f.protocol] ?? f.protocol);
+  if (f.filesize_approx) {
+    // Video-only sizes understate the merged file; the +audio flag is why the
+    // finished download is bigger than the number in this list.
+    parts.push(vcodec && !acodec ? `${fmtBytes(f.filesize_approx)} +audio` : fmtBytes(f.filesize_approx));
+  }
+  return parts.join(" · ");
+}
+
+// Bilibili live serves the same tier from several CDN endpoints, so labels
+// collide; the raw format_id is appended only to the ones that would tie.
+function qualityLabels(formats: QualityOption[]): { format_id: string; label: string }[] {
+  const labels = formats.map(qualityLabel);
+  const seen = new Map<string, number>();
+  labels.forEach((l) => seen.set(l, (seen.get(l) ?? 0) + 1));
+  return formats.map((f, i) => ({
+    format_id: f.format_id,
+    label: (seen.get(labels[i]) ?? 0) > 1 ? `${labels[i]} · ${f.format_id}` : labels[i],
+  }));
 }
 
 // Backend stores naive UTC; tag with Z so Date parses the real instant.
@@ -181,10 +267,9 @@ export default function Queue() {
                 <span className="mb-1.5 block text-xs text-ink-faint">Quality (default: best)</span>
                 <select value={formatId} onChange={(e) => setFormatId(e.target.value)} className="input">
                   <option value="">Best available</option>
-                  {probe.formats.map((f) => (
-                    <option key={f.format_id} value={f.format_id}>
-                      {f.resolution ?? f.format_id} {f.ext ?? ""}{" "}
-                      {f.filesize_approx ? `(${(f.filesize_approx / 1e6).toFixed(0)} MB)` : ""}
+                  {qualityLabels(probe.formats).map((o) => (
+                    <option key={o.format_id} value={o.format_id}>
+                      {o.label}
                     </option>
                   ))}
                 </select>

@@ -18,6 +18,11 @@ class QualityOption(BaseModel):
     acodec: str | None = None
     filesize_approx: int | None = None
     tbr: float | None = None
+    # Live rooms carry no resolution/fps/tbr at all — the tier name ('原画',
+    # '高清') and the protocol are the only things that tell two otherwise
+    # identical 'source-N' entries apart, so both reach the dropdown.
+    format_note: str | None = None
+    protocol: str | None = None
 
 
 class ProbeResult(BaseModel):

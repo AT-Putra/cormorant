@@ -52,6 +52,8 @@ def _quality_options(info: dict) -> list[schemas.QualityOption]:
                 acodec=f.get("acodec"),
                 filesize_approx=f.get("filesize_approx"),
                 tbr=tbr,
+                format_note=f.get("format_note"),
+                protocol=f.get("protocol"),
             )
         )
     fmts.sort(
