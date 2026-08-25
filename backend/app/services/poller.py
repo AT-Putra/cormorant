@@ -58,6 +58,21 @@ def profile_url(watch: models.CreatorWatch) -> str:
     return _PROFILE_TEMPLATES.get(watch.platform, "").format(id=cid)
 
 
+def room_url(watch: models.CreatorWatch) -> str:
+    """Where a capture would point: the creator's own live room when one is
+    stored, else their profile (tiktok/douyin/instagram serve the stream off
+    the profile URL itself)."""
+    return watch.live_url or profile_url(watch)
+
+
+# yt-dlp's normal answer for an idle room (BiliLiveIE raises "Streamer is not
+# live"). Offline is the expected state, not a broken sweep.
+_OFFLINE_RE = re.compile(
+    r"not live|is offline|no longer live|live event will begin|hasn.t started",
+    re.IGNORECASE,
+)
+
+
 def is_live(info: dict) -> bool:
     """Flat-probe live signal: is_live bool or yt-dlp's live_status field."""
     return bool(info.get("is_live") or info.get("live_status") == "is_live")
@@ -148,12 +163,56 @@ class PollerService:
         url = profile_url(watch)
         if not url:
             raise ValueError(f"no profile template for platform {watch.platform}")
-        info = await asyncio.to_thread(ytdlp.probe, url, None, extract_flat=True)
+        wants_live = watch.scope in ("lives", "both")
+        wants_posts = watch.scope in ("posts", "both")
+        # A stored room answers the live question on its own, so a lives-only
+        # watch never touches the listing — which is what keeps bilibili lives
+        # working while its space API is rate-limiting us (412).
+        needs_listing = wants_posts or (wants_live and not watch.live_url)
 
-        if watch.scope in ("lives", "both"):
-            await self._check_live(watch, info)
-        if watch.scope in ("posts", "both"):
-            await self._check_posts(watch, info)
+        # Same reason as the watchlist resolve probe: stored cookies decide
+        # what a probe can see, and only the newest page matters — latest_entry
+        # reads the head of the listing.
+        from app.routers.credentials import aget_cookiefile
+
+        cookiefile = await aget_cookiefile(watch.platform)
+        cookie_path = str(cookiefile) if cookiefile else None
+        try:
+            listing = (
+                await asyncio.to_thread(
+                    ytdlp.probe,
+                    url,
+                    cookie_path,
+                    extract_flat=True,
+                    playlist_items="1-5",
+                )
+                if needs_listing
+                else {}
+            )
+            if wants_live:
+                await self._check_live(
+                    watch, await self._live_info(watch, listing, cookie_path)
+                )
+        finally:
+            if cookiefile:
+                cookiefile.unlink(missing_ok=True)
+
+        if wants_posts:
+            await self._check_posts(watch, listing)
+
+    async def _live_info(
+        self, watch: models.CreatorWatch, listing: dict, cookie_path: str | None
+    ) -> dict:
+        """Live status for one creator: their own room when stored, else the
+        live flags the profile listing already carries."""
+        if not watch.live_url:
+            return listing
+        try:
+            return await asyncio.to_thread(ytdlp.probe, watch.live_url, cookie_path)
+        except Exception as exc:
+            if _OFFLINE_RE.search(str(exc)):
+                return {}
+            raise
 
     # ---- decisions ---------------------------------------------------------
 
@@ -164,7 +223,7 @@ class PollerService:
             return  # already capturing this creator
         async with _db() as s:
             rec = models.LiveRecording(
-                room_url=profile_url(watch),
+                room_url=room_url(watch),
                 platform=watch.platform,
                 creator=watch.display_name,
                 origin="watchlist",

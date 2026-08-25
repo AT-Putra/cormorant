@@ -127,3 +127,8 @@ def test_probe_leaves_flat_listings_enumerating(monkeypatch):
     """The poller's creator listing IS the playlist — noplaylist here would
     stop watchlist polling from seeing any posts at all."""
     assert "noplaylist" not in _probe_opts(monkeypatch, extract_flat=True)
+
+
+def test_probe_keeps_playlist_items_cap(monkeypatch):
+    opts = _probe_opts(monkeypatch, extract_flat=True, playlist_items="1-5")
+    assert opts["playlist_items"] == "1-5"

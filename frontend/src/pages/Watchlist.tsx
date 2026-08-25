@@ -1,12 +1,21 @@
 import { useEffect, useState } from "react";
 import { api, type CreatorWatch } from "../api/client";
+import ConfirmDialog from "../components/ConfirmDialog";
 
 export default function Watchlist() {
   const [watches, setWatches] = useState<CreatorWatch[]>([]);
   const [url, setUrl] = useState("");
+  const [liveUrl, setLiveUrl] = useState("");
   const [scope, setScope] = useState<"lives" | "posts" | "both">("both");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // A creator whose listing was walled off lands named after its bare profile
+  // id, so every name is editable in place.
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const [confirming, setConfirming] = useState<CreatorWatch | null>(null);
+  const [roomEditId, setRoomEditId] = useState<number | null>(null);
+  const [draftRoom, setDraftRoom] = useState("");
 
   async function refresh() {
     setWatches(await api.watchlist());
@@ -21,14 +30,40 @@ export default function Watchlist() {
     setBusy(true);
     setError(null);
     try {
-      await api.addWatch(url.trim(), scope);
+      await api.addWatch(url.trim(), scope, liveUrl);
       setUrl("");
+      setLiveUrl("");
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add creator");
     } finally {
       setBusy(false);
     }
+  }
+
+  async function saveRoom(w: CreatorWatch) {
+    const room = draftRoom.trim();
+    setRoomEditId(null);
+    if (room === (w.live_url ?? "")) return;
+    await api.updateWatch(w.id, { live_url: room });
+    await refresh();
+  }
+
+  function roomLabel(w: CreatorWatch) {
+    if (!w.live_url) return "+ live room";
+    try {
+      return `room ${new URL(w.live_url).pathname.replace(/^\//, "") || "set"}`;
+    } catch {
+      return "room set";
+    }
+  }
+
+  async function saveName(w: CreatorWatch) {
+    const name = draftName.trim();
+    setEditingId(null);
+    if (!name || name === w.display_name) return;
+    await api.updateWatch(w.id, { display_name: name });
+    await refresh();
   }
 
   return (
@@ -43,12 +78,19 @@ export default function Watchlist() {
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="Profile or room URL"
-            className="input flex-1"
+            className="input min-h-[44px] min-w-0 flex-1"
+          />
+          <input
+            value={liveUrl}
+            onChange={(e) => setLiveUrl(e.target.value)}
+            placeholder="Live room URL (optional)"
+            title="bilibili keeps live rooms on their own URL (live.bilibili.com/<room>), which a profile page never names"
+            className="input min-h-[44px] min-w-0 flex-1"
           />
           <select
             value={scope}
             onChange={(e) => setScope(e.target.value as typeof scope)}
-            className="input sm:w-auto"
+            className="input min-h-[44px] w-full shrink-0 sm:w-44"
             aria-label="What to record"
           >
             <option value="both">Lives + posts</option>
@@ -94,8 +136,62 @@ export default function Watchlist() {
                     {(w.display_name || "?").trim().charAt(0).toUpperCase()}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-ink">{w.display_name}</p>
-                    <span className="pill mt-0.5 bg-surface-3 text-ink-faint">{w.platform}</span>
+                    {editingId === w.id ? (
+                      <input
+                        autoFocus
+                        value={draftName}
+                        onChange={(e) => setDraftName(e.target.value)}
+                        onBlur={() => void saveName(w)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") setDraftName(w.display_name);
+                          if (e.key === "Enter" || e.key === "Escape") e.currentTarget.blur();
+                        }}
+                        aria-label={`Rename ${w.display_name}`}
+                        className="input input-sm min-h-[28px] w-full"
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        title="Rename"
+                        onClick={() => {
+                          setDraftName(w.display_name);
+                          setEditingId(w.id);
+                        }}
+                        className="block max-w-full cursor-pointer truncate text-left text-sm font-medium text-ink transition-colors hover:text-accent"
+                      >
+                        {w.display_name}
+                      </button>
+                    )}
+                    <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                      <span className="pill bg-surface-3 text-ink-faint">{w.platform}</span>
+                      {roomEditId === w.id ? (
+                        <input
+                          autoFocus
+                          value={draftRoom}
+                          onChange={(e) => setDraftRoom(e.target.value)}
+                          onBlur={() => void saveRoom(w)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Escape") setDraftRoom(w.live_url ?? "");
+                            if (e.key === "Enter" || e.key === "Escape") e.currentTarget.blur();
+                          }}
+                          placeholder="https://live.bilibili.com/…"
+                          aria-label={`Live room URL for ${w.display_name}`}
+                          className="input input-sm min-h-[28px] w-full max-w-xs"
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          title={w.live_url ?? "Where the live check points — blank means the profile page"}
+                          onClick={() => {
+                            setDraftRoom(w.live_url ?? "");
+                            setRoomEditId(w.id);
+                          }}
+                          className="cursor-pointer text-xs text-ink-faint transition-colors hover:text-accent"
+                        >
+                          {roomLabel(w)}
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <select
                     value={w.scope}
@@ -104,7 +200,7 @@ export default function Watchlist() {
                       await refresh();
                     }}
                     aria-label={`Scope for ${w.display_name}`}
-                    className="cursor-pointer rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs text-ink-dim outline-none transition-colors focus:border-accent/50"
+                    className="input input-sm min-h-[32px] w-full sm:w-auto"
                   >
                     <option value="both">lives + posts</option>
                     <option value="lives">lives only</option>
@@ -123,10 +219,8 @@ export default function Watchlist() {
                     enabled
                   </label>
                   <button
-                    onClick={async () => {
-                      await api.removeWatch(w.id);
-                      await refresh();
-                    }}
+                    onClick={() => setConfirming(w)}
+                    aria-label={`Remove ${w.display_name}`}
                     className="min-h-[32px] cursor-pointer rounded-lg border border-bad/30 px-2.5 py-1 text-xs font-medium text-bad transition-colors hover:bg-bad/10"
                   >
                     Remove
@@ -137,6 +231,26 @@ export default function Watchlist() {
           </ul>
         )}
       </section>
+
+      {confirming && (
+        <ConfirmDialog
+          title="Stop watching this creator?"
+          message={
+            <>
+              “{confirming.display_name}” will no longer be polled, so new lives and posts stop
+              being picked up. Already-downloaded files stay in your library.
+            </>
+          }
+          confirmLabel="Remove"
+          onCancel={() => setConfirming(null)}
+          onConfirm={async () => {
+            const id = confirming.id;
+            setConfirming(null);
+            await api.removeWatch(id);
+            await refresh();
+          }}
+        />
+      )}
     </div>
   );
 }

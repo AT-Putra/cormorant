@@ -51,6 +51,7 @@ export interface CreatorWatch {
   creator_id: string;
   display_name: string;
   scope: "lives" | "posts" | "both";
+  live_url: string | null;
   enabled: boolean;
   last_seen_post_id: string | null;
 }
@@ -151,9 +152,15 @@ export const api = {
 
   // watchlist
   watchlist: () => request<CreatorWatch[]>("/api/watchlist"),
-  addWatch: (url: string, scope: string) =>
-    request<CreatorWatch>("/api/watchlist", { method: "POST", body: JSON.stringify({ url, scope }) }),
-  updateWatch: (id: number, patch: { scope?: string; enabled?: boolean }) =>
+  addWatch: (url: string, scope: string, liveUrl?: string) =>
+    request<CreatorWatch>("/api/watchlist", {
+      method: "POST",
+      body: JSON.stringify({ url, scope, live_url: liveUrl?.trim() || null }),
+    }),
+  updateWatch: (
+    id: number,
+    patch: { scope?: string; enabled?: boolean; display_name?: string; live_url?: string },
+  ) =>
     request<CreatorWatch>(`/api/watchlist/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeWatch: (id: number) => request<void>(`/api/watchlist/${id}`, { method: "DELETE" }),
 

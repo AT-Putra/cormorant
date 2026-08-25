@@ -51,6 +51,14 @@ async def init_db() -> None:
             await conn.execute(
                 text("ALTER TABLE download_jobs ADD COLUMN finished_at DATETIME")
             )
+        watch_cols = {
+            r[1]
+            for r in await conn.execute(text("PRAGMA table_info(creator_watches)"))
+        }
+        if "live_url" not in watch_cols:
+            await conn.execute(
+                text("ALTER TABLE creator_watches ADD COLUMN live_url VARCHAR")
+            )
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

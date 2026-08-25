@@ -75,3 +75,29 @@ def test_normalize_url_equivalence(a, b):
 
 def test_normalize_keeps_meaningful_params():
     assert "p" in normalize_url("https://example.com/watch?p=42")
+
+
+def test_creator_id_from_profile_urls():
+    from app.util.platform import creator_id_from_url
+
+    cases = {
+        "https://space.bilibili.com/4549624": "4549624",
+        "https://space.bilibili.com/4549624/video?tid=0": "4549624",
+        "https://www.tiktok.com/@someone": "someone",
+        "https://www.douyin.com/user/MS4wLjABAAAA": "MS4wLjABAAAA",
+        "https://www.xiaohongshu.com/user/profile/5f3a": "5f3a",
+        "https://www.instagram.com/handle/": "handle",
+    }
+    for url, expected in cases.items():
+        assert creator_id_from_url(url) == expected
+
+    # content URLs are not profiles: identity has to come from the probe
+    for url in (
+        "https://www.bilibili.com/video/BV1xx411c7XX",
+        "https://live.bilibili.com/21234",
+        "https://www.instagram.com/p/Cabc123/",
+        "https://www.instagram.com/reel/Cabc123/",
+        "https://www.tiktok.com/@someone/video/12345",
+        "https://example.com/whatever",
+    ):
+        assert creator_id_from_url(url) in (None, "someone")

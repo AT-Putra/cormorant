@@ -114,10 +114,19 @@ def build_opts(job, settings: dict | None = None, *, extra: dict | None = None) 
 
 
 def probe(
-    url: str, cookiefile: str | None = None, *, extract_flat: bool = False
+    url: str,
+    cookiefile: str | None = None,
+    *,
+    extract_flat: bool = False,
+    playlist_items: str | None = None,
 ) -> dict:
     """Full extraction, or flat listing (channels/timelines) when
-    extract_flat=True. Synchronous — run via to_thread."""
+    extract_flat=True. Synchronous — run via to_thread.
+
+    playlist_items ('1', '1-5', ...) caps how far a channel listing is walked:
+    without it yt-dlp pages through a creator's whole upload history, which is
+    both slow and a fast route to a rate-limit block on identity probes.
+    """
     opts: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
@@ -133,6 +142,8 @@ def probe(
         # Guarded on extract_flat: the poller's creator listing IS the
         # playlist, and must keep enumerating.
         opts["noplaylist"] = True
+    if playlist_items:
+        opts["playlist_items"] = playlist_items
     if cookiefile:
         opts["cookiefile"] = cookiefile
     with YoutubeDL(opts) as ydl:

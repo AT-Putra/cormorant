@@ -79,6 +79,11 @@ class CreatorWatch(Base):
     creator_id: Mapped[str]
     display_name: Mapped[str]
     scope: Mapped[str] = mapped_column(default="both")  # lives|posts|both
+    # Where the live check points. Empty means "the profile probe reports live
+    # status itself" (tiktok/douyin/instagram); bilibili keeps rooms in their
+    # own id space (live.bilibili.com/<room> != space.bilibili.com/<mid>) and
+    # nothing in a space listing names the room, so it is stored per creator.
+    live_url: Mapped[str | None]
     enabled: Mapped[bool] = mapped_column(default=True)
     # Per-creator webhook event toggles (plan step 18).
     notify_golive: Mapped[bool] = mapped_column(default=True)
