@@ -39,6 +39,8 @@ export interface DownloadJob {
   progress: number;
   error: string | null;
   is_auto: boolean;
+  started_at: string | null;
+  finished_at: string | null;
 }
 
 export interface CreatorWatch {

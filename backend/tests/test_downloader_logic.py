@@ -6,6 +6,7 @@ hysteresis resume, redownload override.
 
 import asyncio
 import threading
+from datetime import timedelta
 
 import pytest
 
@@ -253,6 +254,37 @@ async def test_progress_written_to_db(mgr, db, fake_engine):
     await mgr.run_job(jid)
     job = await fetch(db, jid)
     assert job.progress == 100.0
+
+
+async def test_run_stamps_started_and_finished(mgr, db, fake_engine):
+    """A completed run records both run timestamps."""
+    _, add = make_job(db)
+    jid = await add()
+    await mgr.run_job(jid)
+    job = await fetch(db, jid)
+    assert job.started_at is not None
+    assert job.finished_at is not None
+    assert job.finished_at >= job.started_at
+
+
+async def test_retry_refreshes_run_timestamps(mgr, db, fake_engine):
+    """Pause clears finished_at; the next run re-stamps both."""
+    _, add = make_job(db, status="paused")  # parked job, resume path
+    jid = await add()
+    await mgr.run_job(jid)  # first (resumed) run completes
+    done1 = await fetch(db, jid)
+    assert done1.finished_at is not None
+
+    # Simulate a retry: back to paused, then run again.
+    async with db.async_session() as s:
+        job = await s.get(models.DownloadJob, jid)
+        job.status = "paused"
+        job.finished_at = models.utcnow() - timedelta(hours=1)
+        await s.commit()
+    await mgr.run_job(jid)
+    job2 = await fetch(db, jid)
+    assert job2.status == "done"
+    assert job2.finished_at > done1.finished_at  # re-stamped, not stale
 
 
 async def test_failed_job_records_error(mgr, db, fake_engine):

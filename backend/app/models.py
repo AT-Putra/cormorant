@@ -44,6 +44,10 @@ class DownloadJob(Base):
     error: Mapped[str | None]
     is_auto: Mapped[bool] = mapped_column(default=False)
     redownload_requested: Mapped[bool] = mapped_column(default=False)
+    # First probe of the current/last run; refreshed on each run.
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Terminal-status timestamp (done|failed|skipped).
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

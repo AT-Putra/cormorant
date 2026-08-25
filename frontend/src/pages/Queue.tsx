@@ -8,6 +8,32 @@ function fmtBytes(n: number | null | undefined): string {
   return mb >= 1000 ? `${(mb / 1000).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
 }
 
+// Backend stores naive UTC; tag with Z so Date parses the real instant.
+function toDate(iso: string): Date {
+  return new Date(/Z|[+-]\d{2}:\d{2}$/.test(iso) ? iso : `${iso}Z`);
+}
+
+function fmtTime(iso: string): string {
+  const d = toDate(iso);
+  const opts: Intl.DateTimeFormatOptions =
+    d.toDateString() === new Date().toDateString()
+      ? { hour: "2-digit", minute: "2-digit" }
+      : { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" };
+  // NBSP keeps each timestamp atomic; lines wrap only at the "·" separator.
+  return d.toLocaleString(undefined, opts).replace(/ /g, " ");
+}
+
+async function copyText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+  // Fallback for plain-http LAN access where the async clipboard is absent.
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand("copy");
+  ta.remove();
+}
+
 const STATUS_STYLES: Record<string, string> = {
   queued: "bg-surface-3 text-ink-dim",
   probing: "bg-cyan-950/60 text-cyan-300",
@@ -263,6 +289,8 @@ export default function Queue() {
                     </p>
                   )}
 
+                  <JobMeta job={job} />
+
                   <div className="mt-3 flex gap-1.5 sm:hidden">
                     <JobButtons job={job} onAction={action} onConfirm={() => setConfirming(job)} />
                   </div>
@@ -293,6 +321,57 @@ export default function Queue() {
           }}
         />
       )}
+    </div>
+  );
+}
+
+// Icon-only copy button (44px hit area, 16px glyph) — label lives on aria/title.
+function CopyLinkButton({ url }: { url: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={async () => {
+        try {
+          await copyText(url);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          /* clipboard unavailable */
+        }
+      }}
+      title={`Copy source link: ${url}`}
+      aria-label={`Copy source link: ${url}`}
+      className="group/copy flex h-11 w-11 cursor-pointer items-center justify-center rounded-lg text-ink-faint transition-colors hover:bg-surface-3 hover:text-ink"
+    >
+      {copied ? (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden className="h-4 w-4 text-emerald-400">
+          <path d="m5 13 4 4L19 7" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" aria-hidden className="h-4 w-4">
+          <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+          <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+// Meta strip: started/finished times + copyable source link.
+function JobMeta({ job }: { job: DownloadJob }) {
+  const bits: string[] = [];
+  if (job.started_at) bits.push(`Started ${fmtTime(job.started_at)}`);
+  if (job.finished_at) bits.push(`Finished ${fmtTime(job.finished_at)}`);
+  if (!bits.length && !job.url) return null;
+  return (
+    <div className="mt-2 flex items-center gap-1.5 text-xs text-ink-faint">
+      {bits.length > 0 && (
+        <>
+          <span className="min-w-0 font-mono tabular-nums">{bits.join(" · ")}</span>
+          <span aria-hidden className="text-line">·</span>
+        </>
+      )}
+      <CopyLinkButton url={job.url} />
     </div>
   );
 }

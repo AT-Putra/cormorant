@@ -50,6 +50,8 @@ class DownloadJobOut(BaseModel):
     output_path: str | None
     error: str | None
     is_auto: bool
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

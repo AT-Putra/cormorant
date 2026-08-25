@@ -173,6 +173,8 @@ class DownloadManager:
                 return
 
             await self._set_status(session, job, "probing")
+            job.started_at = models.utcnow()  # first probe of this run
+            await session.commit()
             events.publish({"type": "job.probing", "job_id": job.id})
 
             abort = threading.Event()
@@ -223,6 +225,7 @@ class DownloadManager:
                 job.status = "done"
                 job.progress = 100.0
                 job.error = None
+                job.finished_at = models.utcnow()
                 if out:
                     job.output_path = out
                 job.redownload_requested = False
@@ -252,6 +255,7 @@ class DownloadManager:
                     job.status = "done"
                     job.progress = 100.0
                     job.error = None
+                    job.finished_at = models.utcnow()
                     job.output_path = str(out)
                     job.redownload_requested = False
                     await session.commit()
@@ -400,6 +404,12 @@ class DownloadManager:
         except Exception:  # row vanished (cancel+delete races)
             return
         job.status = status
+        # Terminal runs get a finish stamp; any other state (probing/paused)
+        # clears one left over from a prior run.
+        if status in TERMINAL:
+            job.finished_at = models.utcnow()
+        else:
+            job.finished_at = None
         if error is not None:
             job.error = error
         elif status != "failed":

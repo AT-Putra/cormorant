@@ -37,6 +37,20 @@ async def init_db() -> None:
         # create_all doesn't run connect-event pragmas on a fresh file in all
         # paths; ensure WAL explicitly.
         await conn.execute(text("PRAGMA journal_mode=WAL"))
+        # Lightweight column migration: pre-timestamp databases lack
+        # started_at/finished_at (create_all won't alter existing tables).
+        cols = {
+            r[1]
+            for r in await conn.execute(text("PRAGMA table_info(download_jobs)"))
+        }
+        if "started_at" not in cols:
+            await conn.execute(
+                text("ALTER TABLE download_jobs ADD COLUMN started_at DATETIME")
+            )
+        if "finished_at" not in cols:
+            await conn.execute(
+                text("ALTER TABLE download_jobs ADD COLUMN finished_at DATETIME")
+            )
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
