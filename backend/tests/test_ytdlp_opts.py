@@ -83,3 +83,47 @@ def test_job_snapshot_beats_live_setting():
 def test_garbage_quality_is_ignored_not_crashed():
     assert quality_sort("potato") is None
     assert "format_sort" not in build_opts(_job(selected_quality="potato"))
+
+
+# ---- probe: anthologies vs creator listings ---------------------------------
+
+
+class _CapturingYDL:
+    """Stands in for YoutubeDL so probe's opts can be inspected offline."""
+
+    captured: dict = {}
+
+    def __init__(self, opts):
+        type(self).captured = opts
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def extract_info(self, url, download=False):
+        return {"formats": []}
+
+    def sanitize_info(self, info):
+        return info
+
+
+def _probe_opts(monkeypatch, **kw) -> dict:
+    import app.services.ytdlp as mod
+
+    monkeypatch.setattr(mod, "YoutubeDL", _CapturingYDL)
+    mod.probe("https://www.bilibili.com/video/BV1x", **kw)
+    return _CapturingYDL.captured
+
+
+def test_probe_sets_noplaylist_for_a_video(monkeypatch):
+    """A bilibili anthology resolves to a playlist whose formats live in
+    entries[]; the quality dropdown reads the top level and found none."""
+    assert _probe_opts(monkeypatch)["noplaylist"] is True
+
+
+def test_probe_leaves_flat_listings_enumerating(monkeypatch):
+    """The poller's creator listing IS the playlist — noplaylist here would
+    stop watchlist polling from seeing any posts at all."""
+    assert "noplaylist" not in _probe_opts(monkeypatch, extract_flat=True)

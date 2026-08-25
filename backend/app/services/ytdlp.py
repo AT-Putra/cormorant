@@ -124,6 +124,15 @@ def probe(
         "skip_download": True,
         "extract_flat": extract_flat,
     }
+    if not extract_flat:
+        # Anthologies (bilibili 合集) resolve to a playlist whose formats sit
+        # one level down in entries[], so a quality probe found none at the
+        # top level and the dropdown silently vanished — after spending ~54s
+        # walking all 22 parts. build_opts already downloads with noplaylist,
+        # so this only makes the probe describe the part that will be fetched.
+        # Guarded on extract_flat: the poller's creator listing IS the
+        # playlist, and must keep enumerating.
+        opts["noplaylist"] = True
     if cookiefile:
         opts["cookiefile"] = cookiefile
     with YoutubeDL(opts) as ydl:
