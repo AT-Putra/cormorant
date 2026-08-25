@@ -82,172 +82,296 @@ body {
   }
 }
 
-/* Page transition */
-.page {
-  animation: rise-in 0.28s cubic-bezier(0.2, 0.8, 0.3, 1);
+/* Component classes live in the `components` layer so page-level Tailwind
+   utilities (w-auto, sm:w-80, ...) can override them. Unlayered CSS beats
+   every layer in Tailwind v4, which silently defeated those utilities. */
+@layer components {
+  /* Page transition */
+  .page {
+    animation: rise-in 0.28s cubic-bezier(0.2, 0.8, 0.3, 1);
+  }
+
+  .rise-in {
+    animation: rise-in 0.25s cubic-bezier(0.2, 0.8, 0.3, 1);
+  }
+
+  /* Staggered entrance for cards/rows: add .stagger to a container */
+  .stagger > * {
+    animation: rise-in 0.32s cubic-bezier(0.2, 0.8, 0.3, 1) backwards;
+  }
+  .stagger > *:nth-child(1) { animation-delay: 0ms; }
+  .stagger > *:nth-child(2) { animation-delay: 40ms; }
+  .stagger > *:nth-child(3) { animation-delay: 80ms; }
+  .stagger > *:nth-child(4) { animation-delay: 120ms; }
+  .stagger > *:nth-child(5) { animation-delay: 160ms; }
+  .stagger > *:nth-child(n + 6) { animation-delay: 200ms; }
+
+  /* Cards lift on hover; press feedback via scale, no layout shift */
+  .card {
+    border-radius: 1rem;
+    border: 1px solid var(--color-line);
+    background: linear-gradient(
+      180deg,
+      color-mix(in oklab, var(--color-surface-2), white 2%),
+      var(--color-surface-2)
+    );
+    transition:
+      border-color 0.18s ease,
+      box-shadow 0.18s ease,
+      transform 0.18s ease;
+  }
+  .card-hover:hover {
+    border-color: color-mix(in oklab, var(--color-accent), transparent 70%);
+    box-shadow: 0 8px 30px -12px rgb(34 211 238 / 0.15);
+    transform: translateY(-1px);
+  }
+  .card-hover:active {
+    transform: translateY(0) scale(0.995);
+  }
+
+  /* Gradient accent text */
+  .grad-text {
+    background: linear-gradient(90deg, var(--color-accent), var(--color-accent-2));
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* Primary button with animated gradient sheen */
+  .btn-primary {
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(120deg, var(--color-accent), var(--color-accent-2));
+    color: #0b0d12;
+    font-weight: 600;
+    transition:
+      filter 0.18s ease,
+      transform 0.12s ease,
+      box-shadow 0.18s ease;
+    box-shadow: 0 4px 20px -8px rgb(34 211 238 / 0.4);
+  }
+  .btn-primary:hover:not(:disabled) {
+    filter: brightness(1.08);
+    box-shadow: 0 6px 24px -8px rgb(167 139 250 / 0.45);
+  }
+  .btn-primary:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+  .btn-primary::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      100deg,
+      transparent 30%,
+      rgb(255 255 255 / 0.35) 50%,
+      transparent 70%
+    );
+    background-size: 200% 100%;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .btn-primary:hover:not(:disabled)::after {
+    opacity: 1;
+    animation: shimmer 0.9s ease-out;
+  }
+
+  .btn-secondary {
+    border: 1px solid var(--color-line);
+    background: var(--color-surface-3);
+    transition:
+      border-color 0.18s ease,
+      background 0.18s ease,
+      transform 0.12s ease;
+  }
+  .btn-secondary:hover:not(:disabled) {
+    border-color: color-mix(in oklab, var(--color-ink-dim), transparent 55%);
+    background: color-mix(in oklab, var(--color-surface-3), white 4%);
+  }
+  .btn-secondary:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+
+  /* Inputs */
+  .input {
+    width: 100%;
+    border-radius: 0.75rem;
+    border: 1px solid var(--color-line);
+    background: color-mix(in oklab, var(--color-surface), black 20%);
+    padding: 0.625rem 0.875rem;
+    font-size: 0.875rem;
+    color: var(--color-ink);
+    transition:
+      border-color 0.18s ease,
+      box-shadow 0.18s ease;
+  }
+  .input::placeholder {
+    color: var(--color-ink-faint);
+  }
+  .input:focus {
+    outline: none;
+    border-color: color-mix(in oklab, var(--color-accent), transparent 40%);
+    box-shadow: 0 0 0 3px rgb(34 211 238 / 0.12);
+  }
+
+  /* Selects share the input skin but drop the OS arrow for one that matches
+     the app's stroke icons. width stays overridable by utilities (sm:w-44). */
+  select.input {
+    appearance: none;
+    cursor: pointer;
+    /* room for the chevron, so a long option never sits under it */
+    padding-right: 2.25rem;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239aa3b5' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    background-size: 1rem 1rem;
+    /* Never let a long option stretch or overflow the control */
+    text-overflow: ellipsis;
+  }
+  select.input:hover:not(:disabled) {
+    border-color: color-mix(in oklab, var(--color-ink-dim), transparent 55%);
+  }
+  /* The native popup inherits the control's colors on some platforms; set
+     them explicitly so options stay readable on this dark theme. */
+  select.input option {
+    background: var(--color-surface-2);
+    color: var(--color-ink);
+  }
+
+  /* Compact variant for inline row controls. */
+  .input-sm {
+    border-radius: 0.5rem;
+    padding: 0.375rem 0.625rem;
+    font-size: 0.75rem;
+    color: var(--color-ink-dim);
+  }
+  select.input-sm {
+    padding-right: 1.75rem;
+    background-position: right 0.5rem center;
+    background-size: 0.875rem 0.875rem;
+  }
+
+
+  /* Range slider.
+     The native control is ~16px tall, so dropped straight into a grid row of
+     .input boxes it top-aligns and floats a dozen pixels above the text fields
+     next to it. `.range-box` lends it the input shell; `.range`'s negative
+     block margin keeps a 24px pointer target (WCAG 2.2 target size) from
+     making that shell taller than the text field beside it. */
+  .range-box {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .range-box:focus-within {
+    border-color: color-mix(in oklab, var(--color-accent), transparent 40%);
+    box-shadow: 0 0 0 3px rgb(34 211 238 / 0.12);
+  }
+
+  .range {
+    appearance: none;
+    -webkit-appearance: none;
+    height: 1.5rem;
+    /* 24px tall for the pointer target, 18px of layout, so the shell keeps the
+       text field's line box and both controls end on the same pixel. */
+    margin-block: -0.1875rem;
+    background: transparent;
+    cursor: pointer;
+  }
+  .range:focus {
+    outline: none;
+  }
+
+  /* --range-pct is set inline from the current value: WebKit has no
+     ::-moz-range-progress equivalent, so the fill is painted on the track. */
+  .range::-webkit-slider-runnable-track {
+    height: 6px;
+    border-radius: 999px;
+    background:
+      linear-gradient(90deg, var(--color-accent), var(--color-accent-2)) 0 / var(--range-pct, 50%) 100%
+        no-repeat,
+      var(--color-line);
+  }
+  .range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 1rem;
+    height: 1rem;
+    /* centre the thumb on the 6px track: (6 - 16) / 2 */
+    margin-top: -5px;
+    border-radius: 999px;
+    border: 2px solid var(--color-accent);
+    background: var(--color-ink);
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.5);
+    transition: transform 0.15s ease;
+  }
+  .range::-moz-range-track {
+    height: 6px;
+    border-radius: 999px;
+    background: var(--color-line);
+  }
+  .range::-moz-range-progress {
+    height: 6px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--color-accent), var(--color-accent-2));
+  }
+  .range::-moz-range-thumb {
+    width: 1rem;
+    height: 1rem;
+    border-radius: 999px;
+    border: 2px solid var(--color-accent);
+    background: var(--color-ink);
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.5);
+    transition: transform 0.15s ease;
+  }
+  .range:hover::-webkit-slider-thumb,
+  .range:active::-webkit-slider-thumb {
+    transform: scale(1.15);
+  }
+  .range:hover::-moz-range-thumb,
+  .range:active::-moz-range-thumb {
+    transform: scale(1.15);
+  }
+
+  /* Status pill */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3em;
+    border-radius: 999px;
+    padding: 0.125em 0.65em;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  /* Live recording dot */
+  .dot-live {
+    width: 0.5em;
+    height: 0.5em;
+    border-radius: 999px;
+    background: currentColor;
+    animation: pulse-live 1.4s ease-in-out infinite;
+  }
+
+  /* Progress bar: indeterminate sweep when percent is unknown */
+  .progress-track {
+    height: 6px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--color-line);
+  }
+  .progress-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--color-accent), var(--color-accent-2));
+    transition: width 0.4s ease-out;
+  }
+  .progress-indeterminate {
+    width: 40% !important;
+    animation: progress-slide 1.2s ease-in-out infinite;
+  }
 }
 
-.rise-in {
-  animation: rise-in 0.25s cubic-bezier(0.2, 0.8, 0.3, 1);
-}
-
-/* Staggered entrance for cards/rows: add .stagger to a container */
-.stagger > * {
-  animation: rise-in 0.32s cubic-bezier(0.2, 0.8, 0.3, 1) backwards;
-}
-.stagger > *:nth-child(1) { animation-delay: 0ms; }
-.stagger > *:nth-child(2) { animation-delay: 40ms; }
-.stagger > *:nth-child(3) { animation-delay: 80ms; }
-.stagger > *:nth-child(4) { animation-delay: 120ms; }
-.stagger > *:nth-child(5) { animation-delay: 160ms; }
-.stagger > *:nth-child(n + 6) { animation-delay: 200ms; }
-
-/* Cards lift on hover; press feedback via scale, no layout shift */
-.card {
-  border-radius: 1rem;
-  border: 1px solid var(--color-line);
-  background: linear-gradient(
-    180deg,
-    color-mix(in oklab, var(--color-surface-2), white 2%),
-    var(--color-surface-2)
-  );
-  transition:
-    border-color 0.18s ease,
-    box-shadow 0.18s ease,
-    transform 0.18s ease;
-}
-.card-hover:hover {
-  border-color: color-mix(in oklab, var(--color-accent), transparent 70%);
-  box-shadow: 0 8px 30px -12px rgb(34 211 238 / 0.15);
-  transform: translateY(-1px);
-}
-.card-hover:active {
-  transform: translateY(0) scale(0.995);
-}
-
-/* Gradient accent text */
-.grad-text {
-  background: linear-gradient(90deg, var(--color-accent), var(--color-accent-2));
-  background-clip: text;
-  color: transparent;
-}
-
-/* Primary button with animated gradient sheen */
-.btn-primary {
-  position: relative;
-  overflow: hidden;
-  background: linear-gradient(120deg, var(--color-accent), var(--color-accent-2));
-  color: #0b0d12;
-  font-weight: 600;
-  transition:
-    filter 0.18s ease,
-    transform 0.12s ease,
-    box-shadow 0.18s ease;
-  box-shadow: 0 4px 20px -8px rgb(34 211 238 / 0.4);
-}
-.btn-primary:hover:not(:disabled) {
-  filter: brightness(1.08);
-  box-shadow: 0 6px 24px -8px rgb(167 139 250 / 0.45);
-}
-.btn-primary:active:not(:disabled) {
-  transform: scale(0.98);
-}
-.btn-primary::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    100deg,
-    transparent 30%,
-    rgb(255 255 255 / 0.35) 50%,
-    transparent 70%
-  );
-  background-size: 200% 100%;
-  opacity: 0;
-  pointer-events: none;
-}
-.btn-primary:hover:not(:disabled)::after {
-  opacity: 1;
-  animation: shimmer 0.9s ease-out;
-}
-
-.btn-secondary {
-  border: 1px solid var(--color-line);
-  background: var(--color-surface-3);
-  transition:
-    border-color 0.18s ease,
-    background 0.18s ease,
-    transform 0.12s ease;
-}
-.btn-secondary:hover:not(:disabled) {
-  border-color: color-mix(in oklab, var(--color-ink-dim), transparent 55%);
-  background: color-mix(in oklab, var(--color-surface-3), white 4%);
-}
-.btn-secondary:active:not(:disabled) {
-  transform: scale(0.98);
-}
-
-/* Inputs */
-.input {
-  width: 100%;
-  border-radius: 0.75rem;
-  border: 1px solid var(--color-line);
-  background: color-mix(in oklab, var(--color-surface), black 20%);
-  padding: 0.625rem 0.875rem;
-  font-size: 0.875rem;
-  color: var(--color-ink);
-  transition:
-    border-color 0.18s ease,
-    box-shadow 0.18s ease;
-}
-.input::placeholder {
-  color: var(--color-ink-faint);
-}
-.input:focus {
-  outline: none;
-  border-color: color-mix(in oklab, var(--color-accent), transparent 40%);
-  box-shadow: 0 0 0 3px rgb(34 211 238 / 0.12);
-}
-
-/* Status pill */
-.pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3em;
-  border-radius: 999px;
-  padding: 0.125em 0.65em;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-/* Live recording dot */
-.dot-live {
-  width: 0.5em;
-  height: 0.5em;
-  border-radius: 999px;
-  background: currentColor;
-  animation: pulse-live 1.4s ease-in-out infinite;
-}
-
-/* Progress bar: indeterminate sweep when percent is unknown */
-.progress-track {
-  height: 6px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--color-line);
-}
-.progress-fill {
-  height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--color-accent), var(--color-accent-2));
-  transition: width 0.4s ease-out;
-}
-.progress-indeterminate {
-  width: 40% !important;
-  animation: progress-slide 1.2s ease-in-out infinite;
-}
 @keyframes progress-slide {
   0% {
     margin-left: -40%;
@@ -284,6 +408,12 @@ dialog[open]::backdrop {
   .card-hover:active,
   .btn-secondary:active,
   .btn-primary:active {
+    transform: none;
+  }
+  .range:hover::-webkit-slider-thumb,
+  .range:active::-webkit-slider-thumb,
+  .range:hover::-moz-range-thumb,
+  .range:active::-moz-range-thumb {
     transform: none;
   }
   html {
