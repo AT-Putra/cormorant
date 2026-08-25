@@ -103,6 +103,11 @@ async def ytdlp_update(session: AsyncSession = Depends(get_session)):
     else:
         cmd = [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"]
 
+    try:
+        before = await _run_fresh_version()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=f"version probe failed: {exc}")
+
     def _pip():
         return subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
@@ -113,6 +118,11 @@ async def ytdlp_update(session: AsyncSession = Depends(get_session)):
     if result.returncode != 0:
         raise HTTPException(status_code=500, detail=f"pip failed: {result.stderr[-400:]}")
 
+    # pip -U is a no-op when current; only recycle the process on a real bump.
+    after = await _run_fresh_version()
+    if after == before:
+        return {"updated": False, "restarting": False, "version": after}
+
     # Graceful restart so upgraded code actually loads; under compose
     # `restart: unless-stopped` recycles the container. Dev: user restarts manually.
     async def _exit_soon():
@@ -120,4 +130,4 @@ async def ytdlp_update(session: AsyncSession = Depends(get_session)):
         os.kill(os.getpid(), signal.SIGTERM)
 
     asyncio.create_task(_exit_soon())
-    return {"updated": True, "restarting": True}
+    return {"updated": True, "restarting": True, "version": after}

@@ -167,7 +167,7 @@ export const api = {
     }),
   ytdlpVersion: () => request<{ version: string }>("/api/settings/ytdlp/version"),
   ytdlpUpdate: () =>
-    request<{ updated: boolean; restarting: boolean }>("/api/settings/ytdlp/update", { method: "POST" }),
+    request<{ updated: boolean; restarting: boolean; version: string }>("/api/settings/ytdlp/update", { method: "POST" }),
 
   // notifications
   notifConfig: () =>

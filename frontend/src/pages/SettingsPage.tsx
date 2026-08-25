@@ -88,8 +88,13 @@ export default function SettingsPage() {
     setError(null);
     setMessage(null);
     try {
-      await api.ytdlpUpdate();
-      setMessage("yt-dlp updated — app is restarting to load the new version.");
+      const r = await api.ytdlpUpdate();
+      setMessage(
+        r.updated
+          ? `yt-dlp updated to ${r.version} — app is restarting to load it.`
+          : `yt-dlp is already up to date (${r.version}).`,
+      );
+      if (r.updated) setYtdlp(r.version);
     } catch (err) {
       const m = err instanceof Error ? err.message : "Update failed";
       setError(m.includes("deferred_until_idle") ? "Deferred: downloads/recording active." : m);

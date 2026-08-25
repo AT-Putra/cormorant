@@ -257,6 +257,10 @@ body {
   }
 }
 
+/* Restore viewport centering that Tailwind preflight strips from <dialog>. */
+dialog {
+  margin: auto;
+}
 dialog[open] {
   animation: dialog-pop 0.15s ease-out;
 }

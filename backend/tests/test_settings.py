@@ -101,6 +101,13 @@ def test_idle_guard_unit(authed_client):
     assert asyncio.new_event_loop().run_until_complete(_run()) is False
 
 
+def _constant(v):
+    async def _f():
+        return v
+
+    return _f
+
+
 def test_update_idle_pip_success(authed_client, monkeypatch):
     client, _ = authed_client
 
@@ -112,11 +119,34 @@ def test_update_idle_pip_success(authed_client, monkeypatch):
         return FakeResult()
 
     monkeypatch.setattr(settings_mod.subprocess, "run", fake_run)
+    # Version probe reports a bump across the pip run.
+    versions = iter(["1.0.0", "2.0.0"])
+    async def _bump():
+        return next(versions)
+
+    monkeypatch.setattr(settings_mod, "_run_fresh_version", _bump)
     # prevent the real SIGTERM task from firing during the test
     monkeypatch.setattr(settings_mod.os, "kill", lambda *a, **k: None)
     r = client.post("/api/settings/ytdlp/update")
     assert r.status_code == 200, r.text
-    assert r.json() == {"updated": True, "restarting": True}
+    assert r.json() == {"updated": True, "restarting": True, "version": "2.0.0"}
+
+
+def test_update_no_change_skips_restart(authed_client, monkeypatch):
+    client, _ = authed_client
+
+    class FakeResult:
+        returncode = 0
+        stderr = ""
+
+    monkeypatch.setattr(settings_mod.subprocess, "run", lambda *a, **k: FakeResult())
+    # pip -U found nothing newer: same version before and after.
+    monkeypatch.setattr(
+        settings_mod, "_run_fresh_version", _constant("9.9.9")
+    )
+    r = client.post("/api/settings/ytdlp/update")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"updated": False, "restarting": False, "version": "9.9.9"}
 
 
 def test_update_pip_failure(authed_client, monkeypatch):
