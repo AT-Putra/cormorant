@@ -262,7 +262,11 @@ export default function Queue() {
                 <span className="pill mt-1 bg-surface-3 text-ink-faint">{probe.platform}</span>
               </div>
             </div>
-            {probe.formats.length > 0 && (
+            {/* An empty list used to render nothing at all, so a probe that
+                found no formats looked identical to one that had not run —
+                three separate bugs reached that same silent dead end. Say so
+                instead, and make clear the download still works. */}
+            {probe.formats.length > 0 ? (
               <label className="block text-sm">
                 <span className="mb-1.5 block text-xs text-ink-faint">Quality (default: best)</span>
                 <select value={formatId} onChange={(e) => setFormatId(e.target.value)} className="input">
@@ -274,6 +278,12 @@ export default function Queue() {
                   ))}
                 </select>
               </label>
+            ) : (
+              <p className="rounded-lg border border-line bg-surface-3/60 px-3 py-2.5 text-xs leading-relaxed text-ink-faint">
+                No selectable formats came back for this URL. Downloading still
+                works and will take the best available stream — there is just
+                nothing here to choose between.
+              </p>
             )}
             <label className="flex cursor-pointer items-center gap-2.5 text-sm text-ink-dim">
               <input
