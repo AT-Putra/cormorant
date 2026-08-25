@@ -28,22 +28,28 @@ def get_manager():
 router = APIRouter(prefix="/api/downloads", tags=["downloads"])
 
 # Formats worth showing in a quality dropdown: real video+audio muxes and
-# progressive files; drop storyboards, m3u8 fragment manifests, tiny audio-only
-# ladders unless they're the only thing available.
+# progressive files. Storyboards and fragment manifests are dropped outright;
+# tiny ladders are demoted rather than dropped, and resurface when a video has
+# nothing above the floor (see _quality_options).
 _MIN_TBR = 200.0
 
 
 def _quality_options(info: dict) -> list[schemas.QualityOption]:
-    fmts = []
+    # The floor is a PREFERENCE, not a filter: a video whose whole ladder sits
+    # under _MIN_TBR would otherwise return [], and Queue.tsx hides the picker
+    # behind formats.length > 0 — an empty dropdown with nothing to explain it,
+    # the same silent failure anthologies used to cause. Thin formats are held
+    # back and used only when nothing else survives.
+    kept: list[schemas.QualityOption] = []
+    thin: list[schemas.QualityOption] = []
     for f in info.get("formats") or []:
         if not f.get("format_id"):
             continue
         if f.get("vcodec") == "none" and f.get("acodec") == "none":
             continue  # storyboards / manifests
         tbr = f.get("tbr")
-        if tbr is not None and tbr < _MIN_TBR:
-            continue
-        fmts.append(
+        bucket = thin if (tbr is not None and tbr < _MIN_TBR) else kept
+        bucket.append(
             schemas.QualityOption(
                 format_id=str(f["format_id"]),
                 ext=f.get("ext") or "",
@@ -57,6 +63,7 @@ def _quality_options(info: dict) -> list[schemas.QualityOption]:
                 protocol=f.get("protocol"),
             )
         )
+    fmts = kept or thin
     fmts.sort(
         key=lambda o: (
             o.tbr or 0,

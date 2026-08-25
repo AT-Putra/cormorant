@@ -59,6 +59,65 @@ def test_probe_filters_and_sorts_formats(client, monkeypatch):
     assert (f137["vcodec"], f137["acodec"], f137["fps"]) == ("avc1.640028", "none", 30)
 
 
+def _thin_probe_info():
+    """Every stream under the 200kbit floor, plus a storyboard. Some short or
+    heavily-compressed clips look like this."""
+    return {
+        "title": "Thin Video",
+        "formats": [
+            {"format_id": "sb0", "ext": "mhtml", "vcodec": "none", "acodec": "none",
+             "tbr": 50},
+            {"format_id": "low1", "ext": "mp4", "resolution": "256x144", "fps": 15,
+             "vcodec": "avc1", "acodec": "mp4a.40.2", "tbr": 120},
+            {"format_id": "low2", "ext": "mp4", "resolution": "426x240", "fps": 15,
+             "vcodec": "avc1", "acodec": "mp4a.40.2", "tbr": 180},
+        ],
+    }
+
+
+def test_thin_formats_resurface_when_nothing_clears_the_floor(client, monkeypatch):
+    """An all-low-bitrate video must not return [] — Queue.tsx hides the
+    picker behind formats.length > 0, so that reads as a dropdown that
+    silently isn't there."""
+    c, _stub, dl = client
+    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None: _thin_probe_info())
+
+    r = c.post("/api/downloads/probe", json={"url": "https://www.bilibili.com/video/BV1xx411c7XX"})
+    assert r.status_code == 200
+    ids = [f["format_id"] for f in r.json()["formats"]]
+    # Sorted by tbr descending, and the storyboard stays dropped even here.
+    assert ids == ["low2", "low1"]
+
+
+def test_thin_formats_stay_demoted_when_better_exist(client, monkeypatch):
+    """The floor is still a preference: nothing thin leaks in alongside real
+    ladders."""
+    c, _stub, dl = client
+    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None: _probe_info())
+
+    r = c.post("/api/downloads/probe", json={"url": "https://www.bilibili.com/video/BV1xx411c7XX"})
+    ids = [f["format_id"] for f in r.json()["formats"]]
+    assert "140" not in ids and "160" not in ids
+
+
+def test_storyboard_only_still_yields_nothing(client, monkeypatch):
+    """Resurfacing thin formats must not resurface manifests/storyboards."""
+    c, _stub, dl = client
+    monkeypatch.setattr(
+        dl.ytdlp,
+        "probe",
+        lambda url, cookiefile=None: {
+            "title": "SB only",
+            "formats": [
+                {"format_id": "sb0", "ext": "mhtml", "vcodec": "none",
+                 "acodec": "none", "tbr": 50},
+            ],
+        },
+    )
+    r = c.post("/api/downloads/probe", json={"url": "https://www.bilibili.com/video/BV1xx411c7XX"})
+    assert r.json()["formats"] == []
+
+
 def _live_probe_info():
     """Bilibili live: no resolution, fps or tbr — the tier note and protocol
     are the only things separating four otherwise identical entries."""
