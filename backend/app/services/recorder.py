@@ -67,15 +67,25 @@ def recording_output_path(platform: str, creator: str, started_at: datetime) -> 
     )
 
 
-def engine_chain(room_url: str, outtmpl: str) -> list[list[str]]:
-    """Ordered engine commands: yt-dlp live first, one streamlink retry."""
+def engine_chain(
+    room_url: str, outtmpl: str, cookiefile: str | None = None
+) -> list[list[str]]:
+    """Ordered engine commands: yt-dlp live first, one streamlink retry.
+
+    Both engines take the same Netscape cookies.txt. Anonymous capture is not
+    merely a login inconvenience: rooms that gate their top tier (or the room
+    itself) behind an account hand a logged-out client the lower ladder and
+    the recording silently lands at that quality, so the stored credential
+    rides along whenever one exists.
+    """
+    ytdlp_cmd = [sys.executable, "-m", "yt_dlp", "--quiet", "--noprogress"]
+    streamlink_cmd = ["streamlink", "--quiet"]
+    if cookiefile:
+        ytdlp_cmd += ["--cookies", cookiefile]
+        streamlink_cmd += ["--http-cookies-file", cookiefile]
     return [
-        [
-            sys.executable, "-m", "yt_dlp",
-            "--quiet", "--noprogress",
-            room_url, "-o", outtmpl,
-        ],
-        ["streamlink", "--quiet", room_url, "best", "-o", outtmpl],
+        [*ytdlp_cmd, room_url, "-o", outtmpl],
+        [*streamlink_cmd, room_url, "best", "-o", outtmpl],
     ]
 
 
@@ -219,18 +229,32 @@ class RecorderSupervisor:
         rc: int | None = -1
         err = ""
         chain_broken_by_stop = False
-        for cmd in engine_chain(rec.room_url, str(out_path)):
-            if self._intended.get(recording_id):
-                # User stop landed while we were between engines — do not
-                # spawn the fallback; finalize as 'ended' below.
-                chain_broken_by_stop = True
-                break
-            proc = await _spawn_proc(cmd)
-            self._registry[recording_id] = (proc, me)
-            rc = await proc.wait()
-            if rc == 0:
-                break
-            err = f"engine ({cmd[0]}) exited with code {rc}"
+        # Local import: credentials imports app.services, so a module-level
+        # import here would be circular (same reason as downloader.py).
+        from app.routers.credentials import aget_cookiefile
+
+        cookiefile = await aget_cookiefile(rec.platform)
+        try:
+            chain = engine_chain(
+                rec.room_url, str(out_path), str(cookiefile) if cookiefile else None
+            )
+            for cmd in chain:
+                if self._intended.get(recording_id):
+                    # User stop landed while we were between engines — do not
+                    # spawn the fallback; finalize as 'ended' below.
+                    chain_broken_by_stop = True
+                    break
+                proc = await _spawn_proc(cmd)
+                self._registry[recording_id] = (proc, me)
+                rc = await proc.wait()
+                if rc == 0:
+                    break
+                err = f"engine ({cmd[0]}) exited with code {rc}"
+        finally:
+            # A capture can run for hours; the temp file has to outlive the
+            # whole chain, not just the first engine.
+            if cookiefile:
+                cookiefile.unlink(missing_ok=True)
 
         produced = out_path.exists() and out_path.stat().st_size > 0
         intended = self._intended.pop(recording_id, None) or (

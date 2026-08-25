@@ -151,6 +151,25 @@ def test_engine_chain_ytdlp_first_streamlink_fallback():
     assert "--live-from-start" not in all_args
 
 
+def test_engine_chain_without_cookies_passes_no_cookie_flags():
+    all_args = [a for cmd in engine_chain("https://live.bilibili.com/1", "/tmp/o.mp4") for a in cmd]
+    assert "--cookies" not in all_args
+    assert "--http-cookies-file" not in all_args
+
+
+def test_engine_chain_hands_cookies_to_both_engines():
+    """Anonymous capture can silently land on a lower tier for gated rooms,
+    so a stored credential must reach the fallback engine too."""
+    ytdlp_cmd, sl_cmd = engine_chain(
+        "https://live.bilibili.com/1", "/tmp/o.mp4", "/tmp/ck.txt"
+    )
+    assert ytdlp_cmd[ytdlp_cmd.index("--cookies") + 1] == "/tmp/ck.txt"
+    assert sl_cmd[sl_cmd.index("--http-cookies-file") + 1] == "/tmp/ck.txt"
+    # Cookie flags must not displace the trailing url/quality/output shape.
+    assert ytdlp_cmd[-3:] == ["https://live.bilibili.com/1", "-o", "/tmp/o.mp4"]
+    assert sl_cmd[-3:] == ["best", "-o", "/tmp/o.mp4"]
+
+
 def test_filename_embeds_started_at_no_collision():
     t1 = datetime(2026, 8, 24, 9, 30, 0)
     p1 = recording_output_path("bilibili", "c1", t1)
