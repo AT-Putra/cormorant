@@ -122,6 +122,11 @@ export const api = {
   login: (password: string) =>
     request<{ ok: boolean }>("/api/auth/login", { method: "POST", body: JSON.stringify({ password }) }),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ ok: boolean }>("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    }),
 
   // downloads
   probe: (url: string) =>

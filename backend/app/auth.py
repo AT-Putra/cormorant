@@ -13,8 +13,8 @@ from datetime import timedelta
 import bcrypt
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from sqlalchemy import delete, select
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -33,6 +33,12 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 class PasswordBody(BaseModel):
     password: str
+
+
+class ChangePasswordBody(BaseModel):
+    current_password: str
+    # Server-side floor mirrors the UI; setup/login stay 4+ by convention too.
+    new_password: str = Field(min_length=4)
 
 
 def get_password_hash(password: str) -> str:
@@ -96,6 +102,56 @@ async def login(body: PasswordBody, response: Response) -> dict:
                 expires_at=utcnow() + SESSION_TTL,
             )
         )
+        await session.commit()
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=int(SESSION_TTL.total_seconds()),
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+    return {"ok": True}
+
+
+@router.post("/change-password")
+async def change_password(
+    body: ChangePasswordBody, request: Request, response: Response
+) -> dict:
+    # Behind the auth gate: the live session cookie proves who's asking;
+    # current_password proves they know the secret (a stolen tab can't rotate it).
+    async with db_mod.async_session() as session:
+        user = await _single_user(session)
+        # verify_password returns False for a missing row/hash → 401 covers both.
+        if user is None or not verify_password(
+            body.current_password, user.password_hash
+        ):
+            raise HTTPException(401, detail="Incorrect current password")
+        seen_hash = user.password_hash
+
+        # Sign out every device, then mint a FRESH token + cookie for this one:
+        # keeping the old token would let a stolen copy survive the rotation,
+        # and re-issuing it would desync the browser's cookie expiry from the
+        # DB row's.
+        await session.execute(delete(AuthSession))
+        token = secrets.token_urlsafe(32)
+        session.add(
+            AuthSession(
+                token_hash=token_hash(token),
+                user_id=user.id,
+                expires_at=utcnow() + SESSION_TTL,
+            )
+        )
+        # Conditional update: rotate only if the hash we just verified is still
+        # current. A concurrent rotation wins the write; we 409 without
+        # committing our deletes/inserts.
+        result = await session.execute(
+            update(AppUser)
+            .where(AppUser.id == user.id, AppUser.password_hash == seen_hash)
+            .values(password_hash=get_password_hash(body.new_password))
+        )
+        if result.rowcount == 0:  # type: ignore[attr-defined]
+            raise HTTPException(409, detail="password_changed_elsewhere")
         await session.commit()
     response.set_cookie(
         SESSION_COOKIE,

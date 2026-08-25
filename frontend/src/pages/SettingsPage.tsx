@@ -14,6 +14,27 @@ export default function SettingsPage() {
   const [cookiePlatform, setCookiePlatform] = useState<(typeof PLATFORMS)[number] | null>(null);
   const [cookieText, setCookieText] = useState("");
 
+  // change password form
+  const [pw, setPw] = useState({ current: "", next: "", confirm: "" });
+  const [pwBusy, setPwBusy] = useState(false);
+
+  async function changePassword(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setMessage(null);
+    setPwBusy(true);
+    try {
+      await api.changePassword(pw.current, pw.next);
+      setPw({ current: "", next: "", confirm: "" });
+      setMessage("Password changed. Other devices have been signed out.");
+    } catch (err) {
+      const m = err instanceof Error ? err.message : "Failed to change password";
+      setError(m.includes("Incorrect") ? "Incorrect current password." : m);
+    } finally {
+      setPwBusy(false);
+    }
+  }
+
   // notification config
   const [notif, setNotif] = useState<{
     channel_type: string;
@@ -307,6 +328,62 @@ export default function SettingsPage() {
         <button onClick={updateYtdlp} className="btn-secondary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm text-ink disabled:opacity-40">
           Update now
         </button>
+      </section>
+
+      {/* Security: change access password */}
+      <section className="card p-5 sm:p-6">
+        <h2 className="mb-4 flex items-center gap-2 text-sm font-medium tracking-wide text-ink-dim uppercase">
+          <span aria-hidden className="h-4 w-1 rounded-full bg-gradient-to-b from-accent to-accent-2" />
+          Security
+        </h2>
+        <form
+          onSubmit={changePassword}
+          className="grid grid-cols-1 gap-4 sm:max-w-md"
+        >
+          <Field label="Current password">
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={pw.current}
+              onChange={(e) => setPw({ ...pw, current: e.target.value })}
+              className="input"
+              required
+            />
+          </Field>
+          <Field label="New password (min 4 characters)">
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={pw.next}
+              onChange={(e) => setPw({ ...pw, next: e.target.value })}
+              className="input"
+              required
+              minLength={4}
+            />
+          </Field>
+          <Field label="Confirm new password">
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={pw.confirm}
+              onChange={(e) => setPw({ ...pw, confirm: e.target.value })}
+              className="input"
+              required
+            />
+          </Field>
+          <div>
+            <button
+              type="submit"
+              disabled={pwBusy || !pw.current || pw.next.length < 4 || pw.next !== pw.confirm}
+              className="btn-primary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {pwBusy ? "Changing…" : "Change password"}
+            </button>
+          </div>
+        </form>
+        <p className="mt-3 text-xs text-ink-faint">
+          Changing the password signs out all other devices.
+        </p>
       </section>
 
       {/* Cookie modal */}

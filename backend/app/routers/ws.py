@@ -22,6 +22,9 @@ router = APIRouter(tags=["ws"])
 # (worker threads publish), so a plain asyncio.Queue wakeup isn't reliable;
 # a bounded deque + short poll is simple and starvation-free.
 POLL_S = 0.1
+# How often an open socket re-validates its session cookie, so password
+# rotation / logout actually signs live sockets out.
+REAUTH_S = 30
 
 
 def _db():
@@ -48,7 +51,16 @@ async def ws_events(ws: WebSocket) -> None:
     events.subscribe(_forward)
     await ws.accept()
     try:
+        last_auth_check = asyncio.get_event_loop().time()
         while True:
+            now = asyncio.get_event_loop().time()
+            if now - last_auth_check >= REAUTH_S:
+                last_auth_check = now
+                async with _db() as session:
+                    live = await _live_session_token(session, token)
+                if live is None:
+                    await ws.close(code=4401)  # signed out / rotated mid-stream
+                    break
             try:
                 event = buf.popleft()
             except IndexError:
