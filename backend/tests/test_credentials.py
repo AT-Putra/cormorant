@@ -55,12 +55,20 @@ def _authed_probe_fail(url, cookiefile=None, **kw):
     raise RuntimeError("This video is only available to registered members; please log in")
 
 
+def _netscape(domain: str, name: str = "SESSDATA", value: str = "v") -> str:
+    """One valid Netscape cookie line. The router parses what was pasted now,
+    so a bare `SESSDATA=x` no longer stands in for a cookies.txt export."""
+    TAB = chr(9)
+    fields = [domain, "TRUE", "/", "TRUE", "2000000000", name, value]
+    return "# Netscape HTTP Cookie File" + chr(10) + TAB.join(fields) + chr(10)
+
+
 def test_save_pasted_cookie_stores_encrypted(authed_client, crypto_tmp, monkeypatch):
     client, _stub = authed_client
     monkeypatch.setattr(cred_mod.ytdlp, "probe", ProbeOk())
     r = client.post(
         "/api/credentials/bilibili",
-        json={"cookie_text": "SESSDATA=supersecret123"},
+        json={"cookie_text": _netscape(".bilibili.com", value="supersecret123")},
     )
     assert r.status_code == 200, r.text
     assert r.json()["validated"] is True
@@ -82,7 +90,7 @@ def test_bad_cookie_rejected_no_row(authed_client, crypto_tmp, monkeypatch):
     monkeypatch.setattr(cred_mod.ytdlp, "probe", _authed_probe_fail)
     r = client.post(
         "/api/credentials/bilibili",
-        json={"cookie_text": "SESSDATA=bogus"},
+        json={"cookie_text": _netscape(".bilibili.com", value="bogus")},
     )
     assert r.status_code == 400
     from app.config import DATA_DIR
@@ -97,7 +105,7 @@ def test_bad_cookie_rejected_no_row(authed_client, crypto_tmp, monkeypatch):
 def test_list_never_returns_blob(authed_client, crypto_tmp, monkeypatch):
     client, _stub = authed_client
     monkeypatch.setattr(cred_mod.ytdlp, "probe", ProbeOk())
-    client.post("/api/credentials/xhs", json={"cookie_text": "a=1"})
+    client.post("/api/credentials/xhs", json={"cookie_text": _netscape(".xiaohongshu.com")})
     r = client.get("/api/credentials")
     assert r.status_code == 200
     body = r.json()
@@ -112,7 +120,7 @@ def json_keys(d):
 def test_delete_credential(authed_client, crypto_tmp, monkeypatch):
     client, _stub = authed_client
     monkeypatch.setattr(cred_mod.ytdlp, "probe", ProbeOk())
-    client.post("/api/credentials/tiktok", json={"cookie_text": "b=2"})
+    client.post("/api/credentials/tiktok", json={"cookie_text": _netscape(".tiktok.com")})
     assert client.delete("/api/credentials/tiktok").status_code == 200
     assert client.get("/api/credentials").json() == []
     assert client.delete("/api/credentials/tiktok").status_code == 404
@@ -155,7 +163,9 @@ def test_validation_probe_is_flat_and_capped(authed_client, crypto_tmp, monkeypa
     probe = ProbeOk()
     monkeypatch.setattr(cred_mod.ytdlp, "probe", probe)
 
-    r = client.post("/api/credentials/tiktok", json={"cookie_text": "sessionid=abc"})
+    r = client.post(
+        "/api/credentials/tiktok", json={"cookie_text": _netscape(".tiktok.com")}
+    )
     assert r.status_code == 200, r.text
 
     assert len(probe.calls) == 1
@@ -163,3 +173,55 @@ def test_validation_probe_is_flat_and_capped(authed_client, crypto_tmp, monkeypa
     assert call["extract_flat"] is True
     # Flat alone still paged 1454 entries in 58s; the cap is load-bearing.
     assert call["playlist_items"] == "1-3"
+
+
+# ---- structural cookie check -------------------------------------------------
+
+
+def test_cookies_for_the_wrong_platform_are_rejected(authed_client, crypto_tmp, monkeypatch):
+    """Pasting one platform's export into another's slot is the easy mistake,
+    and a probe against public content would happily pass it."""
+    client, _stub = authed_client
+    probe = ProbeOk()
+    monkeypatch.setattr(cred_mod.ytdlp, "probe", probe)
+
+    r = client.post(
+        "/api/credentials/bilibili", json={"cookie_text": _netscape(".tiktok.com")}
+    )
+    assert r.status_code == 400
+    assert "tiktok.com" in r.json()["detail"]
+    assert "bilibili.com" in r.json()["detail"]
+    assert probe.calls == []  # rejected before any network call
+
+
+def test_non_netscape_paste_is_rejected(authed_client, crypto_tmp, monkeypatch):
+    client, _stub = authed_client
+    monkeypatch.setattr(cred_mod.ytdlp, "probe", ProbeOk())
+    r = client.post("/api/credentials/bilibili", json={"cookie_text": "SESSDATA=abc123"})
+    assert r.status_code == 400
+    assert "Netscape" in r.json()["detail"]
+
+
+def test_httponly_prefix_is_a_domain_not_a_comment(authed_client, crypto_tmp, monkeypatch):
+    """Several exporters emit #HttpOnly_ on the domain field; skipping those
+    lines as comments would reject a perfectly good export."""
+    client, _stub = authed_client
+    monkeypatch.setattr(cred_mod.ytdlp, "probe", ProbeOk())
+    text = _netscape("#HttpOnly_.bilibili.com")
+    r = client.post("/api/credentials/bilibili", json={"cookie_text": text})
+    assert r.status_code == 200, r.text
+
+
+def test_platforms_without_a_probe_target_skip_the_network(authed_client, crypto_tmp, monkeypatch):
+    """yt-dlp matches only individual posts on douyin/xhs, so there is no
+    durable URL to probe; the structural check is the whole check."""
+    client, _stub = authed_client
+    probe = ProbeOk()
+    monkeypatch.setattr(cred_mod.ytdlp, "probe", probe)
+
+    for platform, domain in (("douyin", ".douyin.com"), ("xhs", ".xiaohongshu.com")):
+        r = client.post(
+            f"/api/credentials/{platform}", json={"cookie_text": _netscape(domain)}
+        )
+        assert r.status_code == 200, r.text
+    assert probe.calls == []

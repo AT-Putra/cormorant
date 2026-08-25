@@ -31,9 +31,71 @@ _PROBE_URLS = {
     "bilibili": "https://www.bilibili.com/video/BV1xx411c7mD",
     "instagram": "https://www.instagram.com/instagram/",
     "tiktok": "https://www.tiktok.com/@tiktok",
-    "douyin": "https://www.douyin.com/",
-    "xhs": "https://www.xiaohongshu.com/user/profile/official",
+    # douyin and xhs are deliberately absent. yt-dlp matches only individual
+    # posts on them — douyin.com/video/<id> and xiaohongshu.com/explore/<id>,
+    # with no profile pattern at all — so the durable public target this table
+    # relies on does not exist. Pinning one post would work until the day it
+    # is deleted, at which point saving cookies breaks with no way to tell why.
+    # Those two get the structural check below and no network probe.
 }
+
+# Cookie domain each platform's credentials must actually come from. Suffix
+# matched, so www.bilibili.com and .bilibili.com both count.
+_COOKIE_DOMAINS = {
+    "bilibili": "bilibili.com",
+    "instagram": "instagram.com",
+    "tiktok": "tiktok.com",
+    "douyin": "douyin.com",
+    "xhs": "xiaohongshu.com",
+}
+
+
+def _cookie_domains(cookie_text: str) -> list[str]:
+    """Domains named by a Netscape cookie file.
+
+    '#HttpOnly_' is a domain-field prefix some exporters emit, not a comment,
+    so it is stripped rather than skipped along with the real comments.
+    """
+    out: list[str] = []
+    for raw in cookie_text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#HttpOnly_"):
+            line = line[len("#HttpOnly_") :]
+        elif line.startswith("#"):
+            continue
+        parts = line.split("	")
+        if len(parts) >= 7 and parts[0]:
+            out.append(parts[0].lstrip(".").lower())
+    return out
+
+
+def _check_cookie_shape(platform: str, cookie_text: str) -> None:
+    """Reject a paste that cannot be this platform's cookies.
+
+    Runs for every platform, before any network call. The probe targets are
+    public content, so a probe passing has never proved the cookies
+    authenticate — it only proves the site answered. This does check something
+    real about what was pasted, and it is the only validation douyin and xhs
+    can get at all (see _PROBE_URLS).
+    """
+    domains = _cookie_domains(cookie_text)
+    if not domains:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No cookies found. Paste a cookies.txt export in Netscape "
+                "format — one cookie per line, fields separated by tabs."
+            ),
+        )
+    want = _COOKIE_DOMAINS[platform]
+    if not any(d == want or d.endswith("." + want) for d in domains):
+        seen = ", ".join(sorted(set(domains))[:3])
+        raise HTTPException(
+            status_code=400,
+            detail=f"These cookies are for {seen}; {platform} needs {want}.",
+        )
 
 
 class CookieTextIn(BaseModel):
@@ -59,14 +121,26 @@ def _is_auth_error(exc: Exception) -> bool:
 
 
 async def _validate_cookie_text(platform: str, cookie_text: str) -> None:
-    """Run threaded yt-dlp probe with the candidate cookies. Raises HTTPException on failure."""
+    """Structural check, then a yt-dlp probe where one is possible.
+
+    Raises HTTPException on failure. Both early exits happen before the
+    temp file exists: it holds the credentials in plaintext, so it is only
+    written when something is actually going to read it, and always
+    removed afterwards.
+    """
     import asyncio
+
+    _check_cookie_shape(platform, cookie_text)
+    probe_url = _PROBE_URLS.get(platform)
+    if probe_url is None:
+        return  # structural check is all this platform can have
 
     tmp = tempfile.NamedTemporaryFile(
         "w", suffix=".txt", prefix=f"vd_cookies_{platform}_", delete=False, encoding="utf-8"
     )
     tmp.write(cookie_text if cookie_text.endswith("\n") else cookie_text + "\n")
     tmp.close()
+
     try:
         try:
             # Flat + capped, never a full extraction. Several probe targets
@@ -78,7 +152,7 @@ async def _validate_cookie_text(platform: str, cookie_text: str) -> None:
             # entries in 58s, so the item cap is load-bearing, not a nicety.
             await asyncio.to_thread(
                 ytdlp.probe,
-                _PROBE_URLS[platform],
+                probe_url,
                 tmp.name,
                 extract_flat=True,
                 playlist_items="1-3",
