@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api/client";
+import { CormorantMark } from "../components/Logo";
 
 export default function Login({ mode, onDone }: { mode: "setup" | "login"; onDone: () => void }) {
   const [password, setPassword] = useState("");
@@ -40,9 +41,7 @@ export default function Login({ mode, onDone }: { mode: "setup" | "login"; onDon
         {/* Brand mark */}
         <div className="flex flex-col items-center gap-3 pb-1 text-center">
           <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-accent-2 text-surface shadow-lg shadow-accent/25">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.25} strokeLinecap="round" strokeLinejoin="round" aria-hidden className="h-7 w-7">
-              <path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16" />
-            </svg>
+            <CormorantMark className="h-8 w-8" />
           </span>
           <div>
             <h1 className="font-display text-xl font-semibold tracking-tight text-ink">Cormorant</h1>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api } from "./api/client";
+import { CormorantMark } from "./components/Logo";
 import Queue from "./pages/Queue";
 import Watchlist from "./pages/Watchlist";
 import SettingsPage from "./pages/SettingsPage";
@@ -56,9 +57,7 @@ function Shell({ children, onLogout }: { children: React.ReactNode; onLogout: ()
         <div className="mx-auto flex h-14 w-full max-w-6xl items-center gap-4 px-4 sm:px-6">
           <NavLink to="/queue" className="group flex items-center gap-2.5">
             <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-accent to-accent-2 text-surface shadow-lg shadow-accent/20 transition-transform group-hover:scale-105">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.25} strokeLinecap="round" strokeLinejoin="round" aria-hidden className="h-4 w-4">
-                <path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16" />
-              </svg>
+              <CormorantMark className="h-[18px] w-[18px]" />
             </span>
             <span className="font-display text-lg font-semibold tracking-tight text-ink">
               Cormorant
