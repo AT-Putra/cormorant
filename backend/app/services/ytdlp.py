@@ -5,6 +5,8 @@ asyncio.to_thread; progress hooks marshal back via loop.call_soon_threadsafe.
 No FastAPI/DB imports on purpose: this module is trivially mockable.
 """
 
+import json
+import logging
 import queue
 import threading
 from pathlib import Path
@@ -12,9 +14,12 @@ from typing import Any
 
 from yt_dlp import YoutubeDL
 from yt_dlp.globals import plugin_dirs as _plugin_dirs
+from yt_dlp.networking import Request
 from yt_dlp.plugins import load_all_plugins as _load_all_plugins
 
 from app.config import MEDIA_ROOT
+
+log = logging.getLogger(__name__)
 
 # Root passed to yt-dlp as a plugin search directory. Its children are the
 # roots yt-dlp scans, so the tree is <PLUGIN_ROOT>/vd/yt_dlp_plugins/extractor
@@ -59,6 +64,13 @@ def _sanitize(component: str) -> str:
     return component.strip().replace("/", "_").replace("\\", "_") or "_"
 
 
+# Placeholders output_dir can fill in. settings_store validates saved folder
+# templates against this exact tuple, so adding one here is what makes it
+# offerable in Settings — the two must not drift.
+FOLDER_FIELDS = ("platform", "creator")
+DEFAULT_FOLDER_TEMPLATE = "{platform}/{creator}"
+
+
 def output_dir(job, settings: dict | None = None) -> Path:
     """MEDIA_ROOT / <folder template> — '{platform}/{creator}' by default.
 
@@ -66,10 +78,24 @@ def output_dir(job, settings: dict | None = None) -> Path:
     re-captures never collide or trip the dup check.
     """
     s = settings or {}
-    folder = (s.get("folder_template") or "{platform}/{creator}").format(
-        platform=_sanitize(getattr(job, "platform", "")),
-        creator=_sanitize(getattr(job, "creator", "")),
-    )
+    fields = {
+        "platform": _sanitize(getattr(job, "platform", "")),
+        "creator": _sanitize(getattr(job, "creator", "")),
+    }
+    template = s.get("folder_template") or DEFAULT_FOLDER_TEMPLATE
+    try:
+        folder = template.format(**fields)
+    except (KeyError, IndexError, ValueError):
+        # Saving an unrenderable template is rejected now, but a row persisted
+        # before that check still has to go somewhere. Falling back beats
+        # raising here: this runs after the cookie file is on disk and after
+        # the job is marked in-flight, so an exception is a failed download
+        # explained only by a bare KeyError.
+        log.warning(
+            "folder_template %r cannot be rendered; using %r",
+            template, DEFAULT_FOLDER_TEMPLATE,
+        )
+        folder = DEFAULT_FOLDER_TEMPLATE.format(**fields)
     return MEDIA_ROOT / folder
 
 
@@ -163,6 +189,24 @@ def probe(
         opts["cookiefile"] = cookiefile
     with YoutubeDL(opts) as ydl:
         return ydl.sanitize_info(ydl.extract_info(url, download=False))
+
+
+def fetch_json(
+    url: str, cookiefile: str | None = None, *, headers: dict[str, str] | None = None
+) -> Any:
+    """GET a JSON endpoint through yt-dlp's own networking. Synchronous.
+
+    Deliberately not httpx: this goes through the same cookiejar parser,
+    default headers and impersonation stack that the extractor will use
+    later, so an answer here is evidence about the real extraction rather
+    than about a second, differently-configured HTTP client.
+    """
+    opts: dict[str, Any] = {"quiet": True, "no_warnings": True}
+    if cookiefile:
+        opts["cookiefile"] = cookiefile
+    with YoutubeDL(opts) as ydl:
+        resp = ydl.urlopen(Request(url, headers=headers or {}))
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def download(opts: dict, url: str) -> dict:

@@ -1,6 +1,7 @@
 """US-007 tests: crypto roundtrip + credentials router (mocked probe, no network)."""
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -55,6 +56,50 @@ def _authed_probe_fail(url, cookiefile=None, **kw):
     raise RuntimeError("This video is only available to registered members; please log in")
 
 
+class NavOk:
+    """Stands in for bilibili's nav endpoint.
+
+    Records the cookiefile CONTENT rather than just its path: the router
+    deletes that file the moment validation returns, so a test asserting on
+    it afterwards would be reading a deleted path and passing vacuously.
+    """
+
+    def __init__(self, *, is_login=True, uname="bili_user_042", vip_status=1, vip_text="年度大会员"):
+        self.calls: list[dict] = []
+        self.is_login = is_login
+        self.uname = uname
+        self.vip_status = vip_status
+        self.vip_text = vip_text
+
+    def __call__(self, url, cookiefile=None, *, headers=None):
+        self.calls.append({
+            "url": url,
+            "cookiefile": cookiefile,
+            "headers": headers,
+            "cookie_text": (
+                Path(cookiefile).read_text(encoding="utf-8") if cookiefile else None
+            ),
+        })
+        if not self.is_login:
+            return {"code": -101, "message": "账号未登录", "data": {"isLogin": False}}
+        return {
+            "code": 0,
+            "message": "0",
+            "data": {
+                "isLogin": True,
+                "uname": self.uname,
+                "mid": 407295012,
+                "vipStatus": self.vip_status,
+                "vipType": 2,
+                "vip_label": {"text": self.vip_text},
+            },
+        }
+
+
+def _nav_network_down(url, cookiefile=None, *, headers=None):
+    raise OSError("Connection reset by peer")
+
+
 def _netscape(domain: str, name: str = "SESSDATA", value: str = "v") -> str:
     """One valid Netscape cookie line. The router parses what was pasted now,
     so a bare `SESSDATA=x` no longer stands in for a cookies.txt export."""
@@ -66,6 +111,7 @@ def _netscape(domain: str, name: str = "SESSDATA", value: str = "v") -> str:
 def test_save_pasted_cookie_stores_encrypted(authed_client, crypto_tmp, monkeypatch):
     client, _stub = authed_client
     monkeypatch.setattr(cred_mod.ytdlp, "probe", ProbeOk())
+    monkeypatch.setattr(cred_mod.ytdlp, "fetch_json", NavOk())
     r = client.post(
         "/api/credentials/bilibili",
         json={"cookie_text": _netscape(".bilibili.com", value="supersecret123")},
@@ -89,8 +135,8 @@ def test_bad_cookie_rejected_no_row(authed_client, crypto_tmp, monkeypatch):
     client, _stub = authed_client
     monkeypatch.setattr(cred_mod.ytdlp, "probe", _authed_probe_fail)
     r = client.post(
-        "/api/credentials/bilibili",
-        json={"cookie_text": _netscape(".bilibili.com", value="bogus")},
+        "/api/credentials/tiktok",
+        json={"cookie_text": _netscape(".tiktok.com", value="bogus")},
     )
     assert r.status_code == 400
     from app.config import DATA_DIR
@@ -183,7 +229,9 @@ def test_cookies_for_the_wrong_platform_are_rejected(authed_client, crypto_tmp, 
     and a probe against public content would happily pass it."""
     client, _stub = authed_client
     probe = ProbeOk()
+    nav = NavOk()
     monkeypatch.setattr(cred_mod.ytdlp, "probe", probe)
+    monkeypatch.setattr(cred_mod.ytdlp, "fetch_json", nav)
 
     r = client.post(
         "/api/credentials/bilibili", json={"cookie_text": _netscape(".tiktok.com")}
@@ -191,7 +239,10 @@ def test_cookies_for_the_wrong_platform_are_rejected(authed_client, crypto_tmp, 
     assert r.status_code == 400
     assert "tiktok.com" in r.json()["detail"]
     assert "bilibili.com" in r.json()["detail"]
-    assert probe.calls == []  # rejected before any network call
+    # rejected before any network call, and before the plaintext temp file
+    # holding the credentials was ever written
+    assert probe.calls == []
+    assert nav.calls == []
 
 
 def test_non_netscape_paste_is_rejected(authed_client, crypto_tmp, monkeypatch):
@@ -207,6 +258,7 @@ def test_httponly_prefix_is_a_domain_not_a_comment(authed_client, crypto_tmp, mo
     lines as comments would reject a perfectly good export."""
     client, _stub = authed_client
     monkeypatch.setattr(cred_mod.ytdlp, "probe", ProbeOk())
+    monkeypatch.setattr(cred_mod.ytdlp, "fetch_json", NavOk())
     text = _netscape("#HttpOnly_.bilibili.com")
     r = client.post("/api/credentials/bilibili", json={"cookie_text": text})
     assert r.status_code == 200, r.text
@@ -218,7 +270,9 @@ def test_platforms_without_a_probe_target_skip_the_network(authed_client, crypto
     the whole check for all three."""
     client, _stub = authed_client
     probe = ProbeOk()
+    nav = NavOk()
     monkeypatch.setattr(cred_mod.ytdlp, "probe", probe)
+    monkeypatch.setattr(cred_mod.ytdlp, "fetch_json", nav)
 
     for platform, domain, name in (
         ("douyin", ".douyin.com", "SESSDATA"),
@@ -230,7 +284,9 @@ def test_platforms_without_a_probe_target_skip_the_network(authed_client, crypto
             json={"cookie_text": _netscape(domain, name)},
         )
         assert r.status_code == 200, r.text
+        assert r.json()["account"] is None  # nothing can identify the session
     assert probe.calls == []
+    assert nav.calls == []
 
 
 def test_probe_targets_route_to_working_extractors():
@@ -277,3 +333,166 @@ def test_required_cookie_must_be_on_the_platform_domain(authed_client, crypto_tm
     r = client.post("/api/credentials/instagram", json={"cookie_text": text})
     assert r.status_code == 400
     assert "sessionid" in r.json()["detail"]
+
+
+# ---- bilibili session check --------------------------------------------------
+
+
+def test_bilibili_revoked_session_is_rejected(authed_client, crypto_tmp, monkeypatch):
+    """The bug this check exists for.
+
+    yt-dlp reads the mere PRESENCE of SESSDATA as being logged in, and then
+    trusts the watch page's embedded ladder instead of calling the playurl
+    API. A revoked SESSDATA therefore yields the logged-out ladder with no
+    error anywhere: measured at a 480p ceiling against 1080p for the same
+    video with no cookie at all. Storing it as "validated" is the part that
+    made it invisible, so validation has to ask bilibili, not a public video.
+    """
+    client, _stub = authed_client
+    probe = ProbeOk()
+    nav = NavOk(is_login=False)
+    monkeypatch.setattr(cred_mod.ytdlp, "probe", probe)
+    monkeypatch.setattr(cred_mod.ytdlp, "fetch_json", nav)
+
+    r = client.post(
+        "/api/credentials/bilibili",
+        json={"cookie_text": _netscape(".bilibili.com", value="revoked")},
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "账号未登录" in detail  # bilibili's own words, not a guess
+    assert "export again" in detail
+
+    from app.config import DATA_DIR
+    import sqlite3 as s3
+
+    con = s3.connect(str(DATA_DIR / "app.db"))
+    rows = con.execute("SELECT COUNT(*) FROM platform_credentials").fetchone()[0]
+    con.close()
+    assert rows == 0  # a dead credential must not be stored at all
+
+
+def test_bilibili_records_account_and_vip_tier(authed_client, crypto_tmp, monkeypatch):
+    client, _stub = authed_client
+    monkeypatch.setattr(cred_mod.ytdlp, "probe", ProbeOk())
+    monkeypatch.setattr(cred_mod.ytdlp, "fetch_json", NavOk())
+
+    r = client.post(
+        "/api/credentials/bilibili",
+        json={"cookie_text": _netscape(".bilibili.com")},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["account"] == "bili_user_042 · 年度大会员"
+
+    listed = client.get("/api/credentials").json()
+    assert listed[0]["account_label"] == "bili_user_042 · 年度大会员"
+
+
+def test_bilibili_without_premium_is_stored_not_rejected(authed_client, crypto_tmp, monkeypatch):
+    """A non-premium account is a perfectly good credential — it still unlocks
+    1080p and members-only posts. The label is what answers "so why is there
+    still no 4K", which a bare "validated" could not."""
+    client, _stub = authed_client
+    monkeypatch.setattr(cred_mod.ytdlp, "probe", ProbeOk())
+    monkeypatch.setattr(cred_mod.ytdlp, "fetch_json", NavOk(vip_status=0))
+
+    r = client.post(
+        "/api/credentials/bilibili",
+        json={"cookie_text": _netscape(".bilibili.com")},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["account"] == "bili_user_042 · no premium"
+
+
+def test_bilibili_auth_check_replaces_the_probe(authed_client, crypto_tmp, monkeypatch):
+    """bilibili's old target was public content, so a logged-out session
+    probed it happily and got stored as valid. The nav check supersedes it;
+    running both would only re-add the latency it was meant to remove."""
+    client, _stub = authed_client
+    probe = ProbeOk()
+    nav = NavOk()
+    monkeypatch.setattr(cred_mod.ytdlp, "probe", probe)
+    monkeypatch.setattr(cred_mod.ytdlp, "fetch_json", nav)
+
+    r = client.post(
+        "/api/credentials/bilibili",
+        json={"cookie_text": _netscape(".bilibili.com", value="live_session")},
+    )
+    assert r.status_code == 200, r.text
+
+    assert probe.calls == []
+    assert "bilibili" not in cred_mod._PROBE_URLS
+    assert len(nav.calls) == 1
+    call = nav.calls[0]
+    assert call["url"] == cred_mod._BILIBILI_NAV
+    # The whole point is asking AS the user: a check that forgot the cookies
+    # would answer "not logged in" for a perfectly good export.
+    assert call["cookiefile"] is not None
+    assert "live_session" in call["cookie_text"]
+    assert "bilibili.com" in (call["headers"] or {}).get("Referer", "")
+
+
+def test_bilibili_network_failure_is_502_not_a_cookie_verdict(
+    authed_client, crypto_tmp, monkeypatch
+):
+    """A dead uplink must not be reported as bad cookies — that sends the user
+    off re-exporting a credential that was fine."""
+    client, _stub = authed_client
+    monkeypatch.setattr(cred_mod.ytdlp, "probe", ProbeOk())
+    monkeypatch.setattr(cred_mod.ytdlp, "fetch_json", _nav_network_down)
+
+    r = client.post(
+        "/api/credentials/bilibili",
+        json={"cookie_text": _netscape(".bilibili.com")},
+    )
+    assert r.status_code == 502
+    assert "network" in r.json()["detail"].lower()
+
+
+def test_auth_check_platforms_are_known_platforms():
+    """A typo in the _AUTH_CHECKS key would silently disable the check rather
+    than fail loudly: .get(platform) just returns None."""
+    assert set(cred_mod._AUTH_CHECKS) <= cred_mod.PLATFORMS
+
+
+# ---- stranded cookie file sweep ----------------------------------------------
+
+
+def test_sweep_removes_cookiefiles_stranded_by_a_killed_process(tmp_path, monkeypatch):
+    """`finally` covers errors and cancellation, not SIGKILL. A live capture
+    holds its decrypted cookie file open for hours by design, so a container
+    restart mid-recording leaves plaintext credentials in /tmp with nobody
+    left who knows the path."""
+    monkeypatch.setattr(cred_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    stranded = [
+        tmp_path / f"{cred_mod._ENGINE_PREFIX}bilibili_abc.txt",
+        tmp_path / f"{cred_mod._ENGINE_PREFIX}tiktok_def.txt",
+        tmp_path / f"{cred_mod._VALIDATE_PREFIX}instagram_ghi.txt",
+    ]
+    for f in stranded:
+        f.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+
+    # Must not touch anything that is not ours.
+    bystanders = [tmp_path / "important.txt", tmp_path / "vd_auth_notours.log"]
+    for f in bystanders:
+        f.write_text("keep me", encoding="utf-8")
+
+    assert cred_mod.sweep_stale_cookiefiles() == 3
+    assert not any(f.exists() for f in stranded)
+    assert all(f.exists() for f in bystanders)
+
+    # Idempotent: a boot with a clean /tmp reports nothing and raises nothing.
+    assert cred_mod.sweep_stale_cookiefiles() == 0
+
+
+def test_sweep_covers_every_prefix_the_module_actually_writes():
+    """A new temp-file prefix that does not join _COOKIEFILE_PREFIXES is
+    plaintext credentials nothing will ever collect."""
+    import re
+
+    src = Path(cred_mod.__file__).read_text(encoding="utf-8")
+    used = set(re.findall(r'prefix=f"\{(_[A-Z_]+)\}', src))
+    assert used, "prefix= is no longer built from a module constant"
+    names = {n for n, v in vars(cred_mod).items() if v in cred_mod._COOKIEFILE_PREFIXES}
+    assert used <= names, f"prefix constants missing from the sweep: {used - names}"

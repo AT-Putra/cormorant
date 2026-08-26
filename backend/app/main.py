@@ -37,6 +37,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from app.services import activity as activity_service
 
     activity_service.install()
+    # Before any worker can create a new one: collect decrypted cookie files
+    # stranded in /tmp by a process that was killed rather than stopped. Has
+    # to be here, while nothing is running — the periodic sweeps would race a
+    # live capture, which legitimately holds its file open for hours.
+    from app.routers.credentials import sweep_stale_cookiefiles
+
+    sweep_stale_cookiefiles()
     await manager.start()
     await poller.start()
     await recovery.start()

@@ -576,3 +576,103 @@ async def test_stop_endpoint_409_when_no_process(client, monkeypatch):
 
     monkeypatch.setattr(rr, "get_recorder", lambda: StubRec())
     assert c.post(f"/api/recordings/{rid}/stop").status_code == 409
+
+
+# ---- live capture quality cap --------------------------------------------------
+
+
+def test_engine_chain_caps_quality_in_both_lanes():
+    """default_quality was ignored for live captures: engine_chain never read
+    settings, so a room offering 4K was recorded at 4K whatever the cap said."""
+    ytdlp_cmd, sl_cmd = engine_chain(
+        "https://live.bilibili.com/1", "/tmp/o.mp4", None, "1080p"
+    )
+    assert ytdlp_cmd[ytdlp_cmd.index("-S") + 1] == "res:1080"
+    assert sl_cmd[-3:] == ["1080p,best", "-o", "/tmp/o.mp4"]
+
+
+def test_engine_chain_quality_cap_is_a_sort_never_a_filter():
+    """These rooms are vertical: a `height<=1080` FILTER reads 1080x1920 as
+    1920, drops the whole 1080p AND 720p ladder and lands on 480x852. `res`
+    sorts on the smaller dimension. And streamlink gets a preference LIST, so
+    a plugin that does not name streams by resolution falls back to best
+    rather than failing to find the stream and recording nothing."""
+    ytdlp_cmd, sl_cmd = engine_chain(
+        "https://live.bilibili.com/1", "/tmp/o.mp4", None, "720p"
+    )
+    joined = " ".join(ytdlp_cmd)
+    assert "height" not in joined
+    assert "-f" not in ytdlp_cmd  # a format filter would hard-drop the ladder
+    assert sl_cmd[-3] == "720p,best"
+    assert sl_cmd[-3].endswith(",best")
+
+
+def test_engine_chain_best_and_unset_add_no_cap():
+    """'best' is the default; it must stay byte-identical to the old command
+    so the cap cannot regress captures for anyone who never set one."""
+    for quality in ("best", None):
+        ytdlp_cmd, sl_cmd = engine_chain(
+            "https://live.bilibili.com/1", "/tmp/o.mp4", None, quality
+        )
+        assert "-S" not in ytdlp_cmd
+        assert sl_cmd[-3:] == ["best", "-o", "/tmp/o.mp4"]
+
+
+def test_engine_chain_cap_survives_alongside_cookies():
+    ytdlp_cmd, sl_cmd = engine_chain(
+        "https://live.bilibili.com/1", "/tmp/o.mp4", "/tmp/ck.txt", "1440p"
+    )
+    assert ytdlp_cmd[ytdlp_cmd.index("--cookies") + 1] == "/tmp/ck.txt"
+    assert ytdlp_cmd[ytdlp_cmd.index("-S") + 1] == "res:1440"
+    assert sl_cmd[sl_cmd.index("--http-cookies-file") + 1] == "/tmp/ck.txt"
+    # Trailing url/quality/output shape is what the engines actually parse.
+    assert ytdlp_cmd[-3:] == ["https://live.bilibili.com/1", "-o", "/tmp/o.mp4"]
+    assert sl_cmd[-3:] == ["1440p,best", "-o", "/tmp/o.mp4"]
+
+
+def test_every_quality_choice_maps_to_a_usable_cap():
+    """QUALITY_CHOICES is the dropdown. A value that produced a bogus -S or a
+    stream name streamlink cannot parse would fail only at capture time."""
+    from app.services.ytdlp import QUALITY_CHOICES
+
+    for quality in QUALITY_CHOICES:
+        ytdlp_cmd, sl_cmd = engine_chain("https://live.bilibili.com/1", "/o", None, quality)
+        if quality == "best":
+            assert "-S" not in ytdlp_cmd
+            continue
+        assert ytdlp_cmd[ytdlp_cmd.index("-S") + 1] == f"res:{quality.removesuffix('p')}"
+        assert sl_cmd[sl_cmd.index("-o") - 1] == f"{quality},best"
+
+
+async def test_supervise_passes_the_saved_quality_into_the_engine_command(
+    sup, db, monkeypatch
+):
+    """engine_chain can cap all it likes if nothing hands it the setting.
+
+    Reads default_quality at capture start rather than at watch creation: a
+    recording row can sit queued across a settings change, and the tier that
+    matters is the one wanted when the bytes actually land.
+    """
+    from app.services.settings_store import save_settings
+
+    async with db.async_session() as s:
+        await save_settings(s, {"default_quality": "720p"})
+
+    out = pin_out(monkeypatch, "capped.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    spawned = script_spawns(monkeypatch, [FakeProc(exit_code=0)])
+
+    real_spawn = rec_mod.asyncio.create_subprocess_exec
+
+    async def spawn_touch(*cmd, **kwargs):
+        out.write_bytes(b"0" * 128)
+        return await real_spawn(*cmd, **kwargs)
+
+    monkeypatch.setattr(rec_mod.asyncio, "create_subprocess_exec", spawn_touch)
+
+    rid = await make_recording(db)()
+    await asyncio.wait_for(sup.start_recording(rid), timeout=5)
+
+    assert len(spawned) == 1
+    cmd = list(spawned[0])
+    assert cmd[cmd.index("-S") + 1] == "res:720"

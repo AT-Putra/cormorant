@@ -317,3 +317,78 @@ async def test_worker_drains_queue(mgr, db, fake_engine):
     statuses = [await fetch(db, jid) for jid in jobs]
     assert [j.status for j in statuses] == ["done", "skipped", "skipped"]
 
+
+
+async def test_cookiefile_is_removed_when_build_opts_raises(mgr, db, fake_engine, monkeypatch):
+    """The plaintext cookie file must not outlive a failed job.
+
+    build_opts renders folder_template, so an unsupported placeholder raises
+    between decrypting the cookies to /tmp and arming the cleanup. It used to
+    sit above the try/finally, which stranded the file once per attempt with
+    nobody left who knew the path.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from app.routers import credentials as cred
+    from app.services import ytdlp as y
+
+    tmp_root = Path(tempfile.gettempdir())
+    before = {p for pre in cred._COOKIEFILE_PREFIXES for p in tmp_root.glob(f"{pre}*.txt")}
+
+    async def _fake_cookiefile(platform):
+        f = tempfile.NamedTemporaryFile(
+            "w", suffix=".txt", prefix=f"{cred._ENGINE_PREFIX}{platform}_",
+            delete=False, encoding="utf-8",
+        )
+        f.write("# Netscape HTTP Cookie File\n")
+        f.close()
+        return Path(f.name)
+
+    monkeypatch.setattr(cred, "aget_cookiefile", _fake_cookiefile)
+
+    def _boom(job, settings, *, extra=None):
+        raise KeyError("title")
+
+    monkeypatch.setattr(y, "build_opts", _boom)
+
+    _, add = make_job(db)
+    jid = await add()
+    await mgr.run_job(jid)
+
+    assert (await fetch(db, jid)).status == "failed"
+    after = {p for pre in cred._COOKIEFILE_PREFIXES for p in tmp_root.glob(f"{pre}*.txt")}
+    assert after == before, f"stranded plaintext cookie file(s): {after - before}"
+
+
+async def test_cookiefile_is_removed_when_the_download_raises(mgr, db, fake_engine, monkeypatch):
+    """Same guarantee on the path that already worked, so a refactor that
+    re-hoists build_opts cannot pass by shrinking the try instead."""
+    import tempfile
+    from pathlib import Path
+
+    from app.routers import credentials as cred
+    from app.services import ytdlp as y
+
+    tmp_root = Path(tempfile.gettempdir())
+    before = {p for pre in cred._COOKIEFILE_PREFIXES for p in tmp_root.glob(f"{pre}*.txt")}
+
+    async def _fake_cookiefile(platform):
+        f = tempfile.NamedTemporaryFile(
+            "w", suffix=".txt", prefix=f"{cred._ENGINE_PREFIX}{platform}_",
+            delete=False, encoding="utf-8",
+        )
+        f.write("# Netscape HTTP Cookie File\n")
+        f.close()
+        return Path(f.name)
+
+    monkeypatch.setattr(cred, "aget_cookiefile", _fake_cookiefile)
+    monkeypatch.setattr(y, "download", lambda opts, url: (_ for _ in ()).throw(RuntimeError("engine died")))
+
+    _, add = make_job(db)
+    jid = await add()
+    await mgr.run_job(jid)
+
+    assert (await fetch(db, jid)).status == "failed"
+    after = {p for pre in cred._COOKIEFILE_PREFIXES for p in tmp_root.glob(f"{pre}*.txt")}
+    assert after == before, f"stranded plaintext cookie file(s): {after - before}"

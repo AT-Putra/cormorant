@@ -18,6 +18,7 @@ from sqlalchemy import update as sa_update
 
 from app import models
 from app.services import events, ytdlp
+from app.services.settings_store import decode_setting
 
 log = logging.getLogger(__name__)
 
@@ -104,19 +105,27 @@ class DownloadManager:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def get_concurrency(self) -> int:
+        # Key is "concurrency_cap", which is what settings_store writes. This
+        # read said "concurrency" — a key nothing has ever written — so the
+        # Settings slider moved a number the queue never looked at, and the
+        # cap was pinned to DEFAULT_CONCURRENCY forever.
         async with _db() as s:
-            row = await s.get(models.AppSetting, "concurrency")
+            row = await s.get(models.AppSetting, "concurrency_cap")
+            if row is None:
+                return DEFAULT_CONCURRENCY
             try:
-                return max(1, min(8, int(row.value))) if row else DEFAULT_CONCURRENCY
-            except ValueError:
+                return max(1, min(8, int(decode_setting(row.value))))
+            except (TypeError, ValueError):
                 return DEFAULT_CONCURRENCY
 
     async def get_floor(self) -> float:
         async with _db() as s:
             row = await s.get(models.AppSetting, "space_floor_pct")
+            if row is None:
+                return DEFAULT_SPACE_FLOOR_PCT
             try:
-                return float(row.value) if row else DEFAULT_SPACE_FLOOR_PCT
-            except ValueError:
+                return float(decode_setting(row.value))
+            except (TypeError, ValueError):
                 return DEFAULT_SPACE_FLOOR_PCT
 
     # ---- public API ------------------------------------------------------
@@ -209,10 +218,16 @@ class DownloadManager:
                 from app.routers.credentials import aget_cookiefile
 
                 cookiefile = await aget_cookiefile(job.platform)
-                if cookiefile:
-                    extra["cookiefile"] = str(cookiefile)
-                opts = ytdlp.build_opts(job, settings, extra=extra)
+                # Everything that touches the decrypted file lives INSIDE the
+                # try. build_opts used to sit above it, which looked harmless
+                # until you notice it renders folder_template: an unsupported
+                # placeholder raises KeyError (or ValueError on a stray brace)
+                # between creating the plaintext cookie file and arming the
+                # cleanup, stranding it in /tmp forever, once per attempt.
                 try:
+                    if cookiefile:
+                        extra["cookiefile"] = str(cookiefile)
+                    opts = ytdlp.build_opts(job, settings, extra=extra)
                     info = await asyncio.to_thread(ytdlp.download, opts, job.url)
                 finally:
                     if cookiefile:
@@ -454,8 +469,14 @@ class DownloadManager:
             return promoted
 
     async def _setting_str(self, session, key: str, default: str) -> str:
+        # Values are json.dumps()'d on the way in. Returning row.value raw
+        # handed folder_template back wrapped in literal quote characters,
+        # which .format() then baked straight into the output path.
         row = await session.get(models.AppSetting, key)
-        return row.value if row else default
+        if row is None:
+            return default
+        value = decode_setting(row.value)
+        return value if isinstance(value, str) else default
 
     # ---- space-floor watcher ----------------------------------------------
 

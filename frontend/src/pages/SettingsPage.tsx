@@ -158,6 +158,10 @@ export default function SettingsPage() {
                 }
                 className="input"
               />
+              <span className="mt-1.5 block text-ink-faint">
+                Available placeholders: <code>{"{platform}"}</code> and <code>{"{creator}"}</code>.
+                Anything else is rejected on save.
+              </span>
             </Field>
             {/* 4 fields: stack on phones, 2x2 on tablets, one row on desktop
                 so no breakpoint leaves a lone orphan on its own line. */}
@@ -218,7 +222,8 @@ export default function SettingsPage() {
               <button
                 key={p}
                 onClick={() => setCookiePlatform(p)}
-                aria-label={`${p} cookies${cred ? " — configured" : " — not configured"}`}
+                title={cred?.account_label ?? undefined}
+                aria-label={`${p} cookies${cred ? ` — signed in${cred.account_label ? ` as ${cred.account_label}` : ""}` : " — not configured"}`}
                 className={`flex min-h-[36px] cursor-pointer items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium capitalize transition-all ${
                   cred
                     ? "border border-emerald-500/40 bg-emerald-950/40 text-emerald-300"
@@ -235,6 +240,19 @@ export default function SettingsPage() {
             );
           })}
         </div>
+        {creds.some((c) => c.account_label) && (
+          <ul className="mt-3 space-y-1">
+            {creds
+              .filter((c) => c.account_label)
+              .map((c) => (
+                <li key={c.platform} className="flex items-center gap-1.5 text-xs">
+                  <span className="capitalize text-ink-faint">{c.platform}</span>
+                  <span aria-hidden className="text-ink-faint">&rarr;</span>
+                  <span className="font-medium text-emerald-300">{c.account_label}</span>
+                </li>
+              ))}
+          </ul>
+        )}
         <p className="mt-3 text-xs text-ink-faint">
           Click a platform to paste exported cookies (or a cookies.txt file's contents). Encrypted at rest.
         </p>

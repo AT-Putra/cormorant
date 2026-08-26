@@ -1,11 +1,14 @@
 """Per-platform cookie credential storage: paste or cookies.txt upload.
 
-Validation runs a structural check on what was pasted, then a threaded
-yt-dlp probe for the platforms that have a usable target, BEFORE storing.
+Validation runs a structural check on what was pasted, then — BEFORE storing
+— either a real session check against the platform's own auth endpoint
+(_AUTH_CHECKS, which also names the account) or, failing that, a threaded
+yt-dlp probe for the platforms that have a usable target.
 Blobs are Fernet-encrypted at rest; decrypted only in-process for engine
 calls (get_cookiefile), never returned by any API.
 """
 
+import logging
 import tempfile
 from pathlib import Path
 
@@ -19,19 +22,31 @@ from app.db import get_session
 from app.models import PlatformCredential, utcnow
 from app.services import ytdlp
 
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 
 PLATFORMS = {"bilibili", "instagram", "tiktok", "douyin", "xhs"}
 
+# Both prefixes name a file holding DECRYPTED cookies. Kept as constants
+# because sweep_stale_cookiefiles() has to match every one of them: a prefix
+# that drifts out of that tuple is plaintext credentials nothing will collect.
+_ENGINE_PREFIX = "vd_auth_"      # handed to an engine call
+_VALIDATE_PREFIX = "vd_cookies_"  # handed to the save-time validator
+_COOKIEFILE_PREFIXES = (_ENGINE_PREFIX, _VALIDATE_PREFIX)
+
 # Cheap authenticated probe target per platform (popular public content;
 # auth-required errors are the signal we care about, not the content itself)
 _PROBE_URLS = {
-    # BV1xx411c7mD = bilibili video av2, uploaded 2009, the site's oldest
-    # surviving upload. Chosen over a trending video because probe targets
-    # only break when they are deleted.
-    "bilibili": "https://www.bilibili.com/video/BV1xx411c7mD",
     "tiktok": "https://www.tiktok.com/@tiktok",
-    # instagram, douyin and xhs are deliberately absent.
+    # bilibili, instagram, douyin and xhs are deliberately absent.
+    #
+    # bilibili: it has something strictly better — see _AUTH_CHECKS. Its old
+    # target (BV1xx411c7mD, av2, the site's oldest surviving upload) was
+    # public content, so a logged-out session probed it perfectly happily and
+    # got stored as valid. That is not a hypothetical: a revoked SESSDATA sat
+    # in this table reporting "validated" while every bilibili download
+    # quietly lost its top two quality tiers.
     #
     # instagram: a profile URL routes to yt-dlp's instagram:user extractor,
     # which ships with _WORKING = False. It still scrapes the `sharedData`
@@ -139,6 +154,7 @@ class CredentialOut(BaseModel):
     platform: str
     validated_at: str | None
     updated_at: str | None
+    account_label: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -153,29 +169,99 @@ def _is_auth_error(exc: Exception) -> bool:
     return any(m in msg for m in markers)
 
 
-async def _validate_cookie_text(platform: str, cookie_text: str) -> None:
-    """Structural check, then a yt-dlp probe where one is possible.
+# bilibili's own "who am I" endpoint. Answers the question a probe of public
+# content structurally cannot: not "did the site respond" but "is this session
+# logged in, and as whom".
+_BILIBILI_NAV = "https://api.bilibili.com/x/web-interface/nav"
 
-    Raises HTTPException on failure. Both early exits happen before the
-    temp file exists: it holds the credentials in plaintext, so it is only
-    written when something is actually going to read it, and always
-    removed afterwards.
+
+def _check_bilibili_auth(cookiefile: str) -> str:
+    """Verify a bilibili session server-side; return a label for the account.
+
+    Why this exists rather than a probe: yt-dlp's bilibili extractor treats
+    the mere PRESENCE of a SESSDATA cookie as being logged in (its
+    `is_logged_in` property), and on that basis trusts the quality ladder
+    embedded in the watch page instead of calling the playurl API at all.
+    When SESSDATA is present but revoked, the page it reads was served
+    logged-out — so the ladder is the stunted one, and the API call that
+    would have returned the full set never happens.
+
+    Measured on a 4K video with a revoked cookie: 480p ceiling, versus 1080p
+    with no cookie whatsoever. A dead credential is not merely useless here,
+    it is worse than none, and nothing downstream says a word about it. So it
+    has to be caught at save time, which is the only moment a human is
+    watching.
+    """
+    try:
+        payload = ytdlp.fetch_json(
+            _BILIBILI_NAV, cookiefile, headers={"Referer": "https://www.bilibili.com/"}
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Probe network error: {exc}") from exc
+
+    data = payload.get("data") or {}
+    if not data.get("isLogin"):
+        # Logged out answers code -101 / 账号未登录. Carry bilibili's own
+        # message through rather than flattening an unexpected code into a
+        # guess about what went wrong.
+        reason = payload.get("message") or f"code {payload.get('code')}"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"bilibili says this session is not logged in ({reason}). "
+                "SESSDATA is rotated whenever bilibili refreshes it, which "
+                "revokes any copy exported earlier even though its expiry "
+                "date still looks years away. Log in at bilibili.com and "
+                "export again."
+            ),
+        )
+    name = data.get("uname") or str(data.get("mid") or "?")
+    # Labels, never rejects: an account without 大会员 is a perfectly good
+    # credential — it still unlocks 1080p and members-only posts. Recording
+    # the tier is what lets the UI answer "why is there still no 4K", which
+    # a bare "validated" cannot.
+    if data.get("vipStatus") == 1:
+        tier = (data.get("vip_label") or {}).get("text") or "premium"
+    else:
+        tier = "no premium"
+    return f"{name} · {tier}"
+
+
+# Platforms with a real authentication check. Where one exists it replaces the
+# probe entirely: it is faster (one JSON GET, no extraction) and it tests the
+# thing that actually matters.
+_AUTH_CHECKS = {
+    "bilibili": _check_bilibili_auth,
+}
+
+
+async def _validate_cookie_text(platform: str, cookie_text: str) -> str | None:
+    """Structural check, then a real auth check or a yt-dlp probe.
+
+    Returns a human-readable account label when the platform can identify the
+    session, else None. Raises HTTPException on failure. The early exit
+    happens before the temp file exists: it holds the credentials in
+    plaintext, so it is only written when something is actually going to read
+    it, and always removed afterwards.
     """
     import asyncio
 
     _check_cookie_shape(platform, cookie_text)
+    auth_check = _AUTH_CHECKS.get(platform)
     probe_url = _PROBE_URLS.get(platform)
-    if probe_url is None:
-        return  # structural check is all this platform can have
+    if auth_check is None and probe_url is None:
+        return None  # structural check is all this platform can have
 
     tmp = tempfile.NamedTemporaryFile(
-        "w", suffix=".txt", prefix=f"vd_cookies_{platform}_", delete=False, encoding="utf-8"
+        "w", suffix=".txt", prefix=f"{_VALIDATE_PREFIX}{platform}_", delete=False, encoding="utf-8"
     )
     tmp.write(cookie_text if cookie_text.endswith("\n") else cookie_text + "\n")
     tmp.close()
 
     try:
-        try:
+        if auth_check is not None:
+            return await asyncio.to_thread(auth_check, tmp.name)
+        if probe_url is not None:
             # Flat + capped, never a full extraction. Several probe targets
             # are profiles, and extracting one meant pulling every video on
             # them: TikTok's @tiktok took 61s and then died on whichever clip
@@ -183,17 +269,19 @@ async def _validate_cookie_text(platform: str, cookie_text: str) -> None:
             # from webpage request"), failing a cookie save for a reason that
             # had nothing to do with the cookies. Flat alone still paged 1454
             # entries in 58s, so the item cap is load-bearing, not a nicety.
-            await asyncio.to_thread(
-                ytdlp.probe,
-                probe_url,
-                tmp.name,
-                extract_flat=True,
-                playlist_items="1-3",
-            )
-        except Exception as exc:
-            if _is_auth_error(exc):
-                raise HTTPException(status_code=400, detail=f"Cookie validation failed: {exc}")
-            raise HTTPException(status_code=502, detail=f"Probe network error: {exc}")
+            try:
+                await asyncio.to_thread(
+                    ytdlp.probe,
+                    probe_url,
+                    tmp.name,
+                    extract_flat=True,
+                    playlist_items="1-3",
+                )
+            except Exception as exc:
+                if _is_auth_error(exc):
+                    raise HTTPException(status_code=400, detail=f"Cookie validation failed: {exc}")
+                raise HTTPException(status_code=502, detail=f"Probe network error: {exc}")
+        return None
     finally:
         Path(tmp.name).unlink(missing_ok=True)
 
@@ -223,7 +311,7 @@ async def save_credential(
             raise HTTPException(status_code=422, detail="Provide cookie_text JSON body or cookies_file upload")
 
     # Netscape header line optional but tolerated by yt-dlp either way
-    await _validate_cookie_text(platform, text)
+    label = await _validate_cookie_text(platform, text)
 
     blob = crypto.encrypt_cookie_text(text)
     row = (
@@ -238,8 +326,9 @@ async def save_credential(
         row.encrypted_blob = blob
         row.updated_at = utcnow()
     row.validated_at = utcnow()
+    row.account_label = label
     await session.commit()
-    return {"platform": platform, "validated": True}
+    return {"platform": platform, "validated": True, "account": label}
 
 
 # crypto.CONFIG_DIR is read lazily via cfg_mod; tests monkeypatch app.crypto.CONFIG_DIR
@@ -255,6 +344,7 @@ async def list_credentials(session: AsyncSession = Depends(get_session)):
             "platform": r.platform,
             "validated_at": r.validated_at.isoformat() if r.validated_at else None,
             "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+            "account_label": r.account_label,
         }
         for r in rows
     ]
@@ -272,6 +362,37 @@ async def delete_credential(platform: str, session: AsyncSession = Depends(get_s
     await session.delete(row)
     await session.commit()
     return {"deleted": platform}
+
+
+def sweep_stale_cookiefiles() -> int:
+    """Delete decrypted cookie files stranded by a previous process. Boot only.
+
+    Every caller unlinks its own file in a `finally`, which covers errors and
+    cancellation but not death: SIGKILL, OOM, `podman restart`. A live capture
+    holds its file for the whole chain — hours, by design — so a restart
+    mid-recording leaves plaintext credentials in /tmp with nobody left who
+    knows the path.
+
+    Safe to delete everything matching at BOOT specifically, and only there:
+    the process tree that owned those files died with the previous container,
+    so none of them can still be in use. Calling this from the periodic sweep
+    instead would pull the file out from under a running capture.
+    """
+    tmp_root = Path(tempfile.gettempdir())
+    removed = 0
+    for prefix in _COOKIEFILE_PREFIXES:
+        for stale in tmp_root.glob(f"{prefix}*.txt"):
+            try:
+                stale.unlink()
+                removed += 1
+            except OSError:  # pragma: no cover - racing another unlink
+                pass
+    if removed:
+        log.warning(
+            "removed %d cookie file(s) stranded by a previous run; a capture or "
+            "download was killed mid-flight", removed
+        )
+    return removed
 
 
 def get_cookiefile(platform: str) -> Path | None:
@@ -304,7 +425,7 @@ def get_cookiefile(platform: str) -> Path | None:
         return None
     text = crypto.decrypt_cookie_blob(blob)
     tmp = tempfile.NamedTemporaryFile(
-        "w", suffix=".txt", prefix=f"vd_auth_{platform}_", delete=False, encoding="utf-8"
+        "w", suffix=".txt", prefix=f"{_ENGINE_PREFIX}{platform}_", delete=False, encoding="utf-8"
     )
     tmp.write(text if text.endswith("\n") else text + "\n")
     tmp.close()
@@ -325,7 +446,7 @@ async def aget_cookiefile(platform: str) -> Path | None:
             return None
         text = crypto.decrypt_cookie_blob(row.encrypted_blob)
     tmp = tempfile.NamedTemporaryFile(
-        "w", suffix=".txt", prefix=f"vd_auth_{platform}_", delete=False, encoding="utf-8"
+        "w", suffix=".txt", prefix=f"{_ENGINE_PREFIX}{platform}_", delete=False, encoding="utf-8"
     )
     tmp.write(text if text.endswith("\n") else text + "\n")
     tmp.close()

@@ -68,7 +68,10 @@ def recording_output_path(platform: str, creator: str, started_at: datetime) -> 
 
 
 def engine_chain(
-    room_url: str, outtmpl: str, cookiefile: str | None = None
+    room_url: str,
+    outtmpl: str,
+    cookiefile: str | None = None,
+    quality: str | None = None,
 ) -> list[list[str]]:
     """Ordered engine commands: yt-dlp live first, one streamlink retry.
 
@@ -77,6 +80,11 @@ def engine_chain(
     itself) behind an account hand a logged-out client the lower ladder and
     the recording silently lands at that quality, so the stored credential
     rides along whenever one exists.
+
+    `quality` is the account's default_quality. Both lanes cap SOFTLY — they
+    prefer the highest tier at or below the cap, and still record if a room
+    only offers something above it. A hard filter would turn "I'd rather not
+    fill the disk with 4K" into a capture that silently never happens.
     """
     # The capture engine is a SUBPROCESS, so app.services.ytdlp's in-process
     # plugin load does not reach it — the TikTok live/detail override has to be
@@ -95,9 +103,26 @@ def engine_chain(
     if cookiefile:
         ytdlp_cmd += ["--cookies", cookiefile]
         streamlink_cmd += ["--http-cookies-file", cookiefile]
+
+    # yt-dlp: -S res:N, the same format_sort the VOD path uses, for the same
+    # reason — these rooms are vertical, so a `height<=N` FILTER reads
+    # 1080x1920 as 1920 and throws the whole 1080p ladder away. `res` sorts on
+    # the smaller dimension, the way a person reads it.
+    sort = ytdlp.quality_sort(quality)
+    if sort:
+        ytdlp_cmd += ["-S", ",".join(sort)]
+
+    # streamlink: a comma-separated stream list is a PREFERENCE ORDER, so
+    # "1080p,best" takes 1080p when the plugin names it and falls back rather
+    # than failing. Not every plugin names streams by resolution — the
+    # bilibili one yields "httpstream" and "hls" and picks quality server-side
+    # via its own qn parameter — so for those the cap simply no-ops into
+    # `best`, which is the pre-existing behaviour and still records.
+    stream_pref = f"{quality},best" if sort else "best"
+
     return [
         [*ytdlp_cmd, room_url, "-o", outtmpl],
-        [*streamlink_cmd, room_url, "best", "-o", outtmpl],
+        [*streamlink_cmd, room_url, stream_pref, "-o", outtmpl],
     ]
 
 
@@ -255,8 +280,18 @@ class RecorderSupervisor:
 
         cookiefile = await aget_cookiefile(rec.platform)
         try:
+            # Read at capture start, not at watch-creation time: a recording
+            # row can sit queued across a settings change, and the tier that
+            # matters is the one wanted when the bytes actually land.
+            from app.services.settings_store import aget_settings
+
+            async with _db() as settings_session:
+                quality = (await aget_settings(settings_session)).default_quality
             chain = engine_chain(
-                rec.room_url, str(out_path), str(cookiefile) if cookiefile else None
+                rec.room_url,
+                str(out_path),
+                str(cookiefile) if cookiefile else None,
+                quality,
             )
             for cmd in chain:
                 if self._intended.get(recording_id):

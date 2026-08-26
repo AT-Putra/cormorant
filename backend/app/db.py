@@ -59,6 +59,14 @@ async def init_db() -> None:
             await conn.execute(
                 text("ALTER TABLE creator_watches ADD COLUMN live_url VARCHAR")
             )
+        cred_cols = {
+            r[1]
+            for r in await conn.execute(text("PRAGMA table_info(platform_credentials)"))
+        }
+        if "account_label" not in cred_cols:
+            await conn.execute(
+                text("ALTER TABLE platform_credentials ADD COLUMN account_label VARCHAR")
+            )
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

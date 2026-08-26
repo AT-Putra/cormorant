@@ -99,6 +99,10 @@ class PlatformCredential(Base):
     platform: Mapped[str] = mapped_column(primary_key=True)
     encrypted_blob: Mapped[str] = mapped_column(Text)
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Who the stored session belongs to, as the platform itself reported it at
+    # save time (e.g. "bili_user_042 · 年度大会员"). Display only — never an input
+    # to any engine call. None for platforms with no auth check.
+    account_label: Mapped[str | None] = mapped_column(default=None)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

@@ -60,6 +60,9 @@ export interface CredentialInfo {
   platform: string;
   validated_at: string | null;
   updated_at: string | null;
+  /** Account the stored session belongs to, e.g. "bili_user_042 · 年度大会员".
+   *  Null for platforms with no auth check. */
+  account_label: string | null;
 }
 
 export interface AppSettings {
