@@ -101,11 +101,19 @@ def engine_chain(
     ]
 
 
-def probe_is_live(room_url: str) -> bool:
+def probe_is_live(room_url: str, cookiefile: str | None = None) -> bool:
     """Sync live-status probe for boot reconciliation (Decision C: yt-dlp
-    probes only, run via to_thread). Any extractor error counts as offline."""
+    probes only, run via to_thread). Any extractor error counts as offline.
+
+    The cookies matter as much here as they do for the capture itself: a room
+    that answers a logged-out probe with "not live" is indistinguishable from
+    one that really ended, and reconcile_on_boot would quietly write the
+    recording off as 'ended' rather than resume it. Resolved by the async
+    caller and handed in, because decrypting it here would mean opening a
+    second event loop inside this worker thread.
+    """
     try:
-        info = ytdlp.probe(room_url)
+        info = ytdlp.probe(room_url, cookiefile)
     except Exception:
         return False
     return bool(info.get("is_live"))
@@ -348,7 +356,16 @@ class RecorderSupervisor:
                     rec.id, "interrupted", error="interrupted by app restart"
                 )
                 continue
-            live = await asyncio.to_thread(probe_is_live, rec.room_url)
+            from app.routers.credentials import aget_cookiefile
+
+            cookiefile = await aget_cookiefile(rec.platform)
+            try:
+                live = await asyncio.to_thread(
+                    probe_is_live, rec.room_url, str(cookiefile) if cookiefile else None
+                )
+            finally:
+                if cookiefile:
+                    cookiefile.unlink(missing_ok=True)
             if live:
                 await self._patch_status(
                     rec.id, "interrupted", error="interrupted by app restart"

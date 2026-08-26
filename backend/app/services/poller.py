@@ -53,16 +53,41 @@ _PROFILE_TEMPLATES = {
 }
 
 
+# Platforms whose live room is a fixed path off the handle we already store.
+# Unlike bilibili's rooms (a separate id space, see services/live_rooms), these
+# need no lookup — which matters, because the alternative the poller falls back
+# to does not work: a tiktok PROFILE probe routes to tiktok:user, an extractor
+# that currently dies on "Unable to extract secondary user ID", and even when it
+# answers it describes a video listing that carries no live flag at all. Pointed
+# at /live instead, the same probe reaches tiktok:live and reports is_live.
+_LIVE_TEMPLATES = {
+    "tiktok": "https://www.tiktok.com/@{id}/live",
+}
+
+
+def _safe_id(watch: models.CreatorWatch) -> str:
+    return re.sub(r"[^0-9A-Za-z_.-]", "", str(watch.creator_id)) or "user"
+
+
 def profile_url(watch: models.CreatorWatch) -> str:
-    cid = re.sub(r"[^0-9A-Za-z_.-]", "", str(watch.creator_id)) or "user"
-    return _PROFILE_TEMPLATES.get(watch.platform, "").format(id=cid)
+    return _PROFILE_TEMPLATES.get(watch.platform, "").format(id=_safe_id(watch))
+
+
+def live_url(watch: models.CreatorWatch) -> str | None:
+    """The URL the live check should probe, or None when only the profile is
+    left to look at. A stored room always wins: the user typed it, or
+    live_rooms resolved it at add time."""
+    if watch.live_url:
+        return watch.live_url
+    template = _LIVE_TEMPLATES.get(watch.platform)
+    return template.format(id=_safe_id(watch)) if template else None
 
 
 def room_url(watch: models.CreatorWatch) -> str:
-    """Where a capture would point: the creator's own live room when one is
-    stored, else their profile (tiktok/douyin/instagram serve the stream off
-    the profile URL itself)."""
-    return watch.live_url or profile_url(watch)
+    """Where a capture would point: the creator's live room when one is known,
+    else their profile (douyin/instagram serve the stream off the profile URL
+    itself)."""
+    return live_url(watch) or profile_url(watch)
 
 
 # yt-dlp's normal answer for an idle room (BiliLiveIE raises "Streamer is not
@@ -165,10 +190,12 @@ class PollerService:
             raise ValueError(f"no profile template for platform {watch.platform}")
         wants_live = watch.scope in ("lives", "both")
         wants_posts = watch.scope in ("posts", "both")
-        # A stored room answers the live question on its own, so a lives-only
+        # A known room answers the live question on its own, so a lives-only
         # watch never touches the listing — which is what keeps bilibili lives
-        # working while its space API is rate-limiting us (412).
-        needs_listing = wants_posts or (wants_live and not watch.live_url)
+        # working while its space API is rate-limiting us (412), and what keeps
+        # tiktok lives off the tiktok:user extractor entirely.
+        room = live_url(watch)
+        needs_listing = wants_posts or (wants_live and not room)
 
         # Same reason as the watchlist resolve probe: stored cookies decide
         # what a probe can see, and only the newest page matters — latest_entry
@@ -191,7 +218,7 @@ class PollerService:
             )
             if wants_live:
                 await self._check_live(
-                    watch, await self._live_info(watch, listing, cookie_path)
+                    watch, await self._live_info(watch, room, listing, cookie_path)
                 )
         finally:
             if cookiefile:
@@ -201,14 +228,18 @@ class PollerService:
             await self._check_posts(watch, listing)
 
     async def _live_info(
-        self, watch: models.CreatorWatch, listing: dict, cookie_path: str | None
+        self,
+        watch: models.CreatorWatch,
+        room: str | None,
+        listing: dict,
+        cookie_path: str | None,
     ) -> dict:
-        """Live status for one creator: their own room when stored, else the
-        live flags the profile listing already carries."""
-        if not watch.live_url:
+        """Live status for one creator: their own room when one is known, else
+        the live flags the profile listing already carries."""
+        if not room:
             return listing
         try:
-            return await asyncio.to_thread(ytdlp.probe, watch.live_url, cookie_path)
+            return await asyncio.to_thread(ytdlp.probe, room, cookie_path)
         except Exception as exc:
             if _OFFLINE_RE.search(str(exc)):
                 return {}

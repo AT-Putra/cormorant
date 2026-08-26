@@ -612,10 +612,10 @@ async def test_per_creator_error_isolation(watch_env, monkeypatch):
 
     import app.services.poller as pl
 
-    calls = {"n": 0}
+    probed = []
 
     def flaky_probe(url, cookiefile=None, *, extract_flat=False, playlist_items=None):
-        calls["n"] += 1
+        probed.append(url)
         if "bilibili" in url:  # w1's resolved profile host
             raise RuntimeError("extractor exploded")
         return {"_type": "playlist", "entries": []}
@@ -634,7 +634,12 @@ async def test_per_creator_error_isolation(watch_env, monkeypatch):
     finally:
         events.unsubscribe(cap)
 
-    assert calls["n"] == 2, "second creator still probed after first failed"
+    # What matters is that w2 was reached at all, not how many probes it took:
+    # a "both" tiktok watch spends one on the post listing and one on /live,
+    # because a tiktok profile listing carries no live flag.
+    assert any("tiktok" in u for u in probed), (
+        f"second creator not probed after first failed; probed {probed}"
+    )
     assert any(
         e.get("type") == "watch.poll_error" and e.get("platform") == "bilibili"
         for e in errors
@@ -677,3 +682,103 @@ async def test_disabled_watch_not_polled(watch_env, monkeypatch):
     monkeypatch.setattr(pl.ytdlp, "probe", spy)
     await st["sweep"]()
     assert called == []
+
+
+# ---- tiktok lives: the profile listing cannot answer the live question -------
+
+
+async def test_tiktok_live_check_targets_the_live_room(watch_env, monkeypatch):
+    """A lives-only tiktok watch must probe /live, never the profile.
+
+    tiktok:user currently dies on "Unable to extract secondary user ID", and a
+    listing it did return would describe videos, with no live flag anywhere —
+    so pointing the live check at the profile means a tiktok watch can never
+    fire. /live routes to tiktok:live, which reports is_live.
+    """
+    c, st = watch_env["client"], watch_env
+    _add_creator(c, url="https://www.tiktok.com/@someone", scope="lives")
+
+    import app.services.poller as pl
+
+    probed = []
+
+    def probe(url, cookiefile=None, *, extract_flat=False, playlist_items=None):
+        probed.append(url)
+        if url.endswith("/live"):
+            return {"is_live": True, "id": "room-1"}
+        raise RuntimeError("Unable to extract secondary user ID")
+
+    monkeypatch.setattr(pl.ytdlp, "probe", probe)
+    await st["sweep"]()
+
+    assert probed == ["https://www.tiktok.com/@someone/live"]
+
+
+async def test_tiktok_golive_records_the_live_room(watch_env, monkeypatch):
+    """The capture must point at /live too, not the profile URL."""
+    c, st = watch_env["client"], watch_env
+    _add_creator(c, url="https://www.tiktok.com/@someone", scope="lives")
+
+    import app.services.poller as pl
+
+    monkeypatch.setattr(
+        pl.ytdlp, "probe",
+        lambda url, cookiefile=None, **kw: {"is_live": True, "id": "room-1"},
+    )
+    await st["sweep"]()
+
+    from app import db as db_mod
+    from app.models import LiveRecording
+    from sqlalchemy import select
+
+    async with db_mod.async_session() as s:
+        recs = (await s.execute(select(LiveRecording))).scalars().all()
+    assert [r.room_url for r in recs] == ["https://www.tiktok.com/@someone/live"]
+
+
+async def test_stored_live_url_still_wins(watch_env, monkeypatch):
+    """A hand-entered or resolved room beats the derived template."""
+    c, st = watch_env["client"], watch_env
+    c.post(
+        "/api/watchlist",
+        json={
+            "url": "https://www.tiktok.com/@someone",
+            "scope": "lives",
+            "live_url": "https://www.tiktok.com/@someone/live?lang=en",
+        },
+    )
+
+    import app.services.poller as pl
+
+    probed = []
+
+    def probe(url, cookiefile=None, *, extract_flat=False, playlist_items=None):
+        probed.append(url)
+        return {"is_live": False}
+
+    monkeypatch.setattr(pl.ytdlp, "probe", probe)
+    await st["sweep"]()
+
+    assert probed == ["https://www.tiktok.com/@someone/live?lang=en"]
+
+
+async def test_platform_without_a_live_template_still_uses_the_listing(
+    watch_env, monkeypatch
+):
+    """douyin/instagram/xhs keep the old behaviour: one listing probe, and its
+    live flags are what the live check reads."""
+    c, st = watch_env["client"], watch_env
+    _add_creator(c, url="https://www.douyin.com/user/abc", scope="lives")
+
+    import app.services.poller as pl
+
+    probed = []
+
+    def probe(url, cookiefile=None, *, extract_flat=False, playlist_items=None):
+        probed.append(url)
+        return {"_type": "playlist", "entries": [], "live_status": "not_live"}
+
+    monkeypatch.setattr(pl.ytdlp, "probe", probe)
+    await st["sweep"]()
+
+    assert probed == ["https://www.douyin.com/user/abc"]

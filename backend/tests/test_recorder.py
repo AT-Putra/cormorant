@@ -385,7 +385,7 @@ async def test_stop_between_engines_does_not_spawn_fallback(sup, db, monkeypatch
 
 async def test_reconcile_watchlist_still_live_retriggers(sup, db, monkeypatch):
     rid = await make_recording(db, origin="watchlist")()
-    monkeypatch.setattr(rec_mod, "probe_is_live", lambda url: True)
+    monkeypatch.setattr(rec_mod, "probe_is_live", lambda url, cookiefile=None: True)
     retriggered = []
 
     async def fake_begin(room_url, platform, creator, *, origin):
@@ -412,7 +412,7 @@ async def test_reconcile_watchlist_still_live_retriggers(sup, db, monkeypatch):
 
 async def test_reconcile_watchlist_offline_marks_ended(sup, db, monkeypatch):
     rid = await make_recording(db, origin="watchlist")()
-    monkeypatch.setattr(rec_mod, "probe_is_live", lambda url: False)
+    monkeypatch.setattr(rec_mod, "probe_is_live", lambda url, cookiefile=None: False)
     begin_calls = []
 
     async def fake_begin(*a, **k):
@@ -431,7 +431,7 @@ async def test_reconcile_manual_interrupted_no_auto_rerecord(sup, db, monkeypatc
     rid = await make_recording(db, origin="manual")()
     probe_calls = []
     monkeypatch.setattr(
-        rec_mod, "probe_is_live", lambda url: probe_calls.append(url) or True
+        rec_mod, "probe_is_live", lambda url, cookiefile=None: probe_calls.append(url) or True
     )
     begin_calls = []
 
@@ -450,7 +450,7 @@ async def test_reconcile_manual_interrupted_no_auto_rerecord(sup, db, monkeypatc
 async def test_reconcile_leaves_terminal_rows_alone(sup, db, monkeypatch):
     done_id = await make_recording(db, status="finished")()
     failed_id = await make_recording(db, status="failed")()
-    monkeypatch.setattr(rec_mod, "probe_is_live", lambda url: True)
+    monkeypatch.setattr(rec_mod, "probe_is_live", lambda url, cookiefile=None: True)
     await sup.reconcile_on_boot()
     assert (await fetch(db, done_id)).status == "finished"
     assert (await fetch(db, failed_id)).status == "failed"
