@@ -11,8 +11,23 @@ from pathlib import Path
 from typing import Any
 
 from yt_dlp import YoutubeDL
+from yt_dlp.globals import plugin_dirs as _plugin_dirs
+from yt_dlp.plugins import load_all_plugins as _load_all_plugins
 
 from app.config import MEDIA_ROOT
+
+# Root passed to yt-dlp as a plugin search directory. Its children are the
+# roots yt-dlp scans, so the tree is <PLUGIN_ROOT>/vd/yt_dlp_plugins/extractor
+# — one level deeper than it looks like it should be, by design of
+# plugins.candidate_plugin_paths(), which iterdir()s what you hand it.
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent / "ytdlp_plugins"
+
+# yt-dlp only wires plugins up from its CLI entrypoint, so a library caller
+# has to do it by hand: set the global search path, then load, BEFORE any
+# YoutubeDL is constructed (each instance snapshots the extractor registry).
+# "default" is kept first so a user's own ~/.config plugins still load.
+_plugin_dirs.value = ["default", str(PLUGIN_ROOT)]
+_load_all_plugins()
 
 
 class AbortDownload(Exception):

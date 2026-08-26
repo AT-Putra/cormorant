@@ -78,7 +78,19 @@ def engine_chain(
     the recording silently lands at that quality, so the stored credential
     rides along whenever one exists.
     """
-    ytdlp_cmd = [sys.executable, "-m", "yt_dlp", "--quiet", "--noprogress"]
+    # The capture engine is a SUBPROCESS, so app.services.ytdlp's in-process
+    # plugin load does not reach it — the TikTok live/detail override has to be
+    # handed over on the command line or every FLV-only room dies with
+    # "The channel is not currently live". "default" first keeps yt-dlp's own
+    # plugin directories, which the flag would otherwise replace outright.
+    ytdlp_cmd = [
+        # "--no-progress", not "--noprogress": the latter is the LIBRARY option
+        # name, and yt-dlp's CLI rejects it outright with exit 2 before it ever
+        # looks at the URL — so the yt-dlp engine never ran and every live
+        # capture silently came from the streamlink retry instead.
+        sys.executable, "-m", "yt_dlp", "--quiet", "--no-progress",
+        "--plugin-dirs", "default", "--plugin-dirs", str(ytdlp.PLUGIN_ROOT),
+    ]
     streamlink_cmd = ["streamlink", "--quiet"]
     if cookiefile:
         ytdlp_cmd += ["--cookies", cookiefile]
