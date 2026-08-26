@@ -1,0 +1,67 @@
+# Push to main -> tests -> image on GHCR. The server never builds anything:
+# `docker compose pull` on the host fetches what this workflow produced, which
+# is why the production VM needs no node, no build toolchain, and no headroom
+# for the vite build.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"   # match the runtime image
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r backend/requirements.txt
+      - run: python -m pytest tests/ -q
+        working-directory: backend
+
+  image:
+    # Gate the tag move: a red test suite must never become :latest, because
+    # :latest is what the server's update.sh pulls.
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # scoped to this repo, no PAT needed
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # Lowercase literal: GHCR rejects capitals, and the owner has them.
+          images: ghcr.io/at-putra/cormorant
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long,prefix=
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Without this the pinned ffmpeg tarball is re-downloaded and npm ci
+          # re-run on every push; with it, only changed layers rebuild.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

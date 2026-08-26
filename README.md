@@ -20,11 +20,27 @@ Then open **http://localhost:8000** — first launch asks you to set an access p
 
 ### Production (Docker)
 
+The server runs published images, it does not build. Every push to `main` runs
+the test suite, then publishes `ghcr.io/at-putra/cormorant:latest` and
+`:<git-sha>`.
+
 ```bash
-docker compose up --build -d
+git clone https://github.com/AT-Putra/cormorant.git /opt/cormorant
+cd /opt/cormorant && cp .env.example .env   # set TZ
+docker compose up -d
 ```
 
-Same compose file — plain Compose Spec, no engine-specific extensions.
+Same compose file as dev — plain Compose Spec, no engine-specific extensions.
+
+### Shipping an update
+
+```bash
+./update.sh                    # pull :latest, recreate, wait for HEALTHCHECK
+TAG=<git-sha> ./update.sh      # pin or roll back to one build
+```
+
+Volumes are not touched by container recreation: the SQLite DB, the Fernet key
+and any yt-dlp version installed from the UI all survive an update.
 
 ## Volume layout (named volumes)
 

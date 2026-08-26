@@ -3,6 +3,9 @@ config/
 data/
 media/
 
+# per-host compose settings (TZ, image tag). Tracked as .env.example only.
+.env
+
 # agent + editor scratch
 .omc/
 .claude/

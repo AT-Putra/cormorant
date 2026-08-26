@@ -8,6 +8,12 @@
 
 services:
   app:
+    # `image` and `build` together, deliberately. The server runs published
+    # images (`docker compose pull` -> `up -d`, ~20s, no toolchain on the host);
+    # this laptop still builds from source with `podman compose up --build`,
+    # which writes to this same tag locally without touching the registry.
+    # TAG floats to :latest; set it to a git sha to pin or roll back.
+    image: ghcr.io/at-putra/cormorant:${TAG:-latest}
     build:
       context: .
       dockerfile: backend/Dockerfile
