@@ -3,6 +3,12 @@ uvicorn[standard]>=0.30
 sqlalchemy[asyncio]>=2.0.52
 aiosqlite
 yt-dlp>=2026.8.19
+# yt-dlp's impersonation backend. Without it every TikTok extraction prints
+# "no impersonate target is available" — the extractor asks for a browser TLS
+# fingerprint and silently gets none. It is not a fix for the extraction bugs
+# worked around in app/ytdlp_plugins (measured: installing it changed nothing
+# there), it is the dependency yt-dlp expects to be present.
+curl-cffi>=0.16.2
 streamlink>=8.5
 bcrypt
 cryptography
