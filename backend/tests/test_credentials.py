@@ -213,15 +213,67 @@ def test_httponly_prefix_is_a_domain_not_a_comment(authed_client, crypto_tmp, mo
 
 
 def test_platforms_without_a_probe_target_skip_the_network(authed_client, crypto_tmp, monkeypatch):
-    """yt-dlp matches only individual posts on douyin/xhs, so there is no
-    durable URL to probe; the structural check is the whole check."""
+    """douyin/xhs have no durable URL yt-dlp can extract, and instagram's
+    only durable one routes to a broken extractor; the structural check is
+    the whole check for all three."""
     client, _stub = authed_client
     probe = ProbeOk()
     monkeypatch.setattr(cred_mod.ytdlp, "probe", probe)
 
-    for platform, domain in (("douyin", ".douyin.com"), ("xhs", ".xiaohongshu.com")):
+    for platform, domain, name in (
+        ("douyin", ".douyin.com", "SESSDATA"),
+        ("xhs", ".xiaohongshu.com", "SESSDATA"),
+        ("instagram", ".instagram.com", "sessionid"),
+    ):
         r = client.post(
-            f"/api/credentials/{platform}", json={"cookie_text": _netscape(domain)}
+            f"/api/credentials/{platform}",
+            json={"cookie_text": _netscape(domain, name)},
         )
         assert r.status_code == 200, r.text
     assert probe.calls == []
+
+
+def test_probe_targets_route_to_working_extractors():
+    """instagram's target was a profile URL, which yt-dlp routes to
+    instagram:user — an extractor shipping _WORKING = False because it still
+    scrapes the sharedData blob Instagram removed years ago. Every save died
+    on "Unable to extract data" and no cookie could have passed. Catch the
+    next dead target here rather than in a bug report."""
+    from yt_dlp.extractor import gen_extractor_classes
+
+    candidates = [ie for ie in gen_extractor_classes() if ie.IE_NAME != "generic"]
+    for platform, url in cred_mod._PROBE_URLS.items():
+        match = next((ie for ie in candidates if ie.suitable(url)), None)
+        assert match is not None, f"{platform}: {url} matches no yt-dlp extractor"
+        assert match.working(), (
+            f"{platform}: {url} routes to {match.IE_NAME}, which yt-dlp marks broken"
+        )
+
+
+def test_instagram_export_without_sessionid_is_rejected(authed_client, crypto_tmp, monkeypatch):
+    """sessionid is yt-dlp's _AUTH_COOKIE_NAME for instagram and the thing it
+    reads as _is_logged_in. Without a probe to lean on, an export missing it
+    would otherwise be stored as valid and fail at download time."""
+    client, _stub = authed_client
+    probe = ProbeOk()
+    monkeypatch.setattr(cred_mod.ytdlp, "probe", probe)
+
+    r = client.post(
+        "/api/credentials/instagram",
+        json={"cookie_text": _netscape(".instagram.com", "csrftoken")},
+    )
+    assert r.status_code == 400
+    assert "sessionid" in r.json()["detail"]
+    assert probe.calls == []
+
+
+def test_required_cookie_must_be_on_the_platform_domain(authed_client, crypto_tmp, monkeypatch):
+    """A sessionid from some other site riding along in the same export is
+    not an instagram login."""
+    client, _stub = authed_client
+    monkeypatch.setattr(cred_mod.ytdlp, "probe", ProbeOk())
+
+    text = _netscape(".instagram.com", "csrftoken") + _netscape(".tiktok.com", "sessionid")
+    r = client.post("/api/credentials/instagram", json={"cookie_text": text})
+    assert r.status_code == 400
+    assert "sessionid" in r.json()["detail"]

@@ -1,6 +1,7 @@
 """Per-platform cookie credential storage: paste or cookies.txt upload.
 
-Validation runs a threaded yt-dlp authenticated probe BEFORE storing.
+Validation runs a structural check on what was pasted, then a threaded
+yt-dlp probe for the platforms that have a usable target, BEFORE storing.
 Blobs are Fernet-encrypted at rest; decrypted only in-process for engine
 calls (get_cookiefile), never returned by any API.
 """
@@ -29,14 +30,23 @@ _PROBE_URLS = {
     # surviving upload. Chosen over a trending video because probe targets
     # only break when they are deleted.
     "bilibili": "https://www.bilibili.com/video/BV1xx411c7mD",
-    "instagram": "https://www.instagram.com/instagram/",
     "tiktok": "https://www.tiktok.com/@tiktok",
-    # douyin and xhs are deliberately absent. yt-dlp matches only individual
-    # posts on them — douyin.com/video/<id> and xiaohongshu.com/explore/<id>,
-    # with no profile pattern at all — so the durable public target this table
-    # relies on does not exist. Pinning one post would work until the day it
-    # is deleted, at which point saving cookies breaks with no way to tell why.
-    # Those two get the structural check below and no network probe.
+    # instagram, douyin and xhs are deliberately absent.
+    #
+    # instagram: a profile URL routes to yt-dlp's instagram:user extractor,
+    # which ships with _WORKING = False. It still scrapes the `sharedData`
+    # blob Instagram dropped from its HTML years ago, so every probe died on
+    # "Unable to extract data" and no cookie could ever have passed. The
+    # alternatives are no better: a post URL breaks the day that post is
+    # deleted, and /stories/<user>/ answers "You need to log in" whenever the
+    # account simply has no story up right now, which would reject good
+    # cookies. instagram gets _REQUIRED_COOKIES below instead.
+    #
+    # douyin and xhs: yt-dlp matches only individual posts on them —
+    # douyin.com/video/<id> and xiaohongshu.com/explore/<id>, with no profile
+    # pattern at all — so the durable public target this table relies on does
+    # not exist. Pinning one post would work until the day it is deleted, at
+    # which point saving cookies breaks with no way to tell why.
 }
 
 # Cookie domain each platform's credentials must actually come from. Suffix
@@ -49,14 +59,23 @@ _COOKIE_DOMAINS = {
     "xhs": "xiaohongshu.com",
 }
 
+# Cookie that has to be present for an export to be a logged-in session, for
+# the platforms where yt-dlp names one. instagram's extractors define
+# _AUTH_COOKIE_NAME = "sessionid" and read its presence as _is_logged_in, so
+# an export without it authenticates nothing however many other cookies rode
+# along. With no probe target left, this is instagram's only real check.
+_REQUIRED_COOKIES = {
+    "instagram": "sessionid",
+}
 
-def _cookie_domains(cookie_text: str) -> list[str]:
-    """Domains named by a Netscape cookie file.
 
-    '#HttpOnly_' is a domain-field prefix some exporters emit, not a comment,
+def _cookie_entries(cookie_text: str) -> list[tuple[str, str]]:
+    """(domain, name) for every cookie in a Netscape cookie file.
+
+    "#HttpOnly_" is a domain-field prefix some exporters emit, not a comment,
     so it is stripped rather than skipped along with the real comments.
     """
-    out: list[str] = []
+    out: list[tuple[str, str]] = []
     for raw in cookie_text.splitlines():
         line = raw.strip()
         if not line:
@@ -67,21 +86,21 @@ def _cookie_domains(cookie_text: str) -> list[str]:
             continue
         parts = line.split("	")
         if len(parts) >= 7 and parts[0]:
-            out.append(parts[0].lstrip(".").lower())
+            out.append((parts[0].lstrip(".").lower(), parts[5]))
     return out
 
 
 def _check_cookie_shape(platform: str, cookie_text: str) -> None:
-    """Reject a paste that cannot be this platform's cookies.
+    """Reject a paste that cannot be this platform's logged-in cookies.
 
     Runs for every platform, before any network call. The probe targets are
     public content, so a probe passing has never proved the cookies
-    authenticate — it only proves the site answered. This does check something
-    real about what was pasted, and it is the only validation douyin and xhs
-    can get at all (see _PROBE_URLS).
+    authenticate — it only proves the site answered. This does check
+    something real about what was pasted, and it is the whole of validation
+    for instagram, douyin and xhs (see _PROBE_URLS).
     """
-    domains = _cookie_domains(cookie_text)
-    if not domains:
+    entries = _cookie_entries(cookie_text)
+    if not entries:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -90,11 +109,25 @@ def _check_cookie_shape(platform: str, cookie_text: str) -> None:
             ),
         )
     want = _COOKIE_DOMAINS[platform]
-    if not any(d == want or d.endswith("." + want) for d in domains):
-        seen = ", ".join(sorted(set(domains))[:3])
+    on_platform = [
+        name for domain, name in entries
+        if domain == want or domain.endswith("." + want)
+    ]
+    if not on_platform:
+        seen = ", ".join(sorted({d for d, _ in entries})[:3])
         raise HTTPException(
             status_code=400,
             detail=f"These cookies are for {seen}; {platform} needs {want}.",
+        )
+    required = _REQUIRED_COOKIES.get(platform)
+    if required and required not in on_platform:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"These {want} cookies have no {required}, so they are a "
+                f"logged-out session. Log in to {want} in the browser you "
+                "export from, then export again."
+            ),
         )
 
 
