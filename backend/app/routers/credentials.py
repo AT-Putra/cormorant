@@ -67,11 +67,15 @@ _PROBE_URLS = {
 # Cookie domain each platform's credentials must actually come from. Suffix
 # matched, so www.bilibili.com and .bilibili.com both count.
 _COOKIE_DOMAINS = {
-    "bilibili": "bilibili.com",
-    "instagram": "instagram.com",
-    "tiktok": "tiktok.com",
-    "douyin": "douyin.com",
-    "xhs": "xiaohongshu.com",
+    "bilibili": ("bilibili.com",),
+    "instagram": ("instagram.com",),
+    "tiktok": ("tiktok.com",),
+    "douyin": ("douyin.com",),
+    # Two domains for one account. Logging in at xiaohongshu.com from outside
+    # China hands the session to rednote.com and leaves xiaohongshu.com looking
+    # logged out, so the only export a user can produce carries .rednote.com --
+    # which this check rejected as "cookies for another site".
+    "xhs": ("xiaohongshu.com", "rednote.com"),
 }
 
 # Cookie that has to be present for an export to be a logged-in session, for
@@ -82,6 +86,10 @@ _COOKIE_DOMAINS = {
 _REQUIRED_COOKIES = {
     "instagram": "sessionid",
 }
+
+
+_TAB = chr(9)
+_NL = chr(10)
 
 
 def _cookie_entries(cookie_text: str) -> list[tuple[str, str]]:
@@ -105,6 +113,52 @@ def _cookie_entries(cookie_text: str) -> list[tuple[str, str]]:
     return out
 
 
+def mirror_cookie_domains(platform: str, cookie_text: str) -> str:
+    """Copy every cookie onto each domain the platform answers on.
+
+    A cookie jar only offers a cookie to the domain the line names, and for
+    xhs the session a user can actually export names rednote.com while
+    yt-dlp's extractor requests xiaohongshu.com. Without this the paste is
+    accepted, stored, decrypted, handed to the engine -- and then ignored on
+    every request, which looks exactly like cookies that do not work.
+
+    Same account, same company: rednote.com's certificate is issued to
+    Xiaohongshu's own corporate entity. Duplicating the line is a local jar
+    edit, not a credential sent anywhere new.
+    """
+    wanted = _COOKIE_DOMAINS.get(platform, ())
+    if len(wanted) < 2:
+        return cookie_text
+    out: list[str] = []
+    # What the export already carries: a browser logged into both hosts pairs
+    # them itself, and a twin added on top of that is a duplicate line.
+    added: set[tuple[str, str]] = set(_cookie_entries(cookie_text))
+    for raw in cookie_text.splitlines():
+        out.append(raw)
+        line = raw.strip()
+        if line.startswith("#HttpOnly_"):
+            line = line[len("#HttpOnly_") :]
+        elif not line or line.startswith("#"):
+            continue
+        parts = line.split(_TAB)
+        if len(parts) < 7 or not parts[0]:
+            continue
+        host = parts[0].lstrip(".").lower()
+        base = next(
+            (w for w in wanted if host == w or host.endswith("." + w)), None
+        )
+        if base is None:
+            continue
+        for other in wanted:
+            if other == base or (other, parts[5]) in added:
+                continue
+            added.add((other, parts[5]))
+            twin = list(parts)
+            twin[0] = "." + other
+            out.append(_TAB.join(twin))
+    return _NL.join(out) + _NL
+
+
 def _check_cookie_shape(platform: str, cookie_text: str) -> None:
     """Reject a paste that cannot be this platform's logged-in cookies.
 
@@ -123,25 +177,25 @@ def _check_cookie_shape(platform: str, cookie_text: str) -> None:
                 "format — one cookie per line, fields separated by tabs."
             ),
         )
-    want = _COOKIE_DOMAINS[platform]
+    wanted = _COOKIE_DOMAINS[platform]
     on_platform = [
         name for domain, name in entries
-        if domain == want or domain.endswith("." + want)
+        if any(domain == w or domain.endswith("." + w) for w in wanted)
     ]
     if not on_platform:
         seen = ", ".join(sorted({d for d, _ in entries})[:3])
         raise HTTPException(
             status_code=400,
-            detail=f"These cookies are for {seen}; {platform} needs {want}.",
+            detail=f"These cookies are for {seen}; {platform} needs {' or '.join(wanted)}.",
         )
     required = _REQUIRED_COOKIES.get(platform)
     if required and required not in on_platform:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"These {want} cookies have no {required}, so they are a "
-                f"logged-out session. Log in to {want} in the browser you "
-                "export from, then export again."
+                f"These {wanted[0]} cookies have no {required}, so they are "
+                f"a logged-out session. Log in to {wanted[0]} in the browser "
+                "you export from, then export again."
             ),
         )
 
@@ -423,7 +477,7 @@ def get_cookiefile(platform: str) -> Path | None:
     blob = asyncio.run(_load())
     if blob is None:
         return None
-    text = crypto.decrypt_cookie_blob(blob)
+    text = mirror_cookie_domains(platform, crypto.decrypt_cookie_blob(blob))
     tmp = tempfile.NamedTemporaryFile(
         "w", suffix=".txt", prefix=f"{_ENGINE_PREFIX}{platform}_", delete=False, encoding="utf-8"
     )
@@ -444,7 +498,7 @@ async def aget_cookiefile(platform: str) -> Path | None:
         ).scalar_one_or_none()
         if row is None:
             return None
-        text = crypto.decrypt_cookie_blob(row.encrypted_blob)
+        text = mirror_cookie_domains(platform, crypto.decrypt_cookie_blob(row.encrypted_blob))
     tmp = tempfile.NamedTemporaryFile(
         "w", suffix=".txt", prefix=f"{_ENGINE_PREFIX}{platform}_", delete=False, encoding="utf-8"
     )

@@ -11,7 +11,11 @@ _DOMAINS: dict[str, tuple[str, ...]] = {
     "instagram": ("instagram.com", "instagr.am"),
     "tiktok": ("tiktok.com",),
     "douyin": ("douyin.com", "iesdouyin.com"),
-    "xhs": ("xiaohongshu.com", "xhslink.com"),
+    # rednote.com is Xiaohongshu's international rebrand, not a mirror: log in
+    # on xiaohongshu.com from outside China and it hands the session to
+    # rednote.com, leaving xiaohongshu.com looking logged out. Its TLS cert is
+    # issued to 行吟信息科技（上海）有限公司, Xiaohongshu's own company.
+    "xhs": ("xiaohongshu.com", "xhslink.com", "rednote.com"),
 }
 
 # Query params that carry tracking/session noise, never content identity.
@@ -83,10 +87,24 @@ def creator_id_from_url(url: str) -> str | None:
     return None
 
 
+# Alias host -> the host every extractor and cookie jar is written against.
+# yt-dlp's XiaoHongShu extractor matches xiaohongshu.com only, so a rednote.com
+# link is the same note that nothing can open.
+_HOST_ALIASES = {"rednote.com": "www.xiaohongshu.com", "www.rednote.com": "www.xiaohongshu.com"}
+
+
+def canonical_url(url: str) -> str:
+    """Rewrite an alias host to the canonical one, leaving the rest alone."""
+    parts = urlsplit(_ensure_scheme(url))
+    host = parts.netloc.lower()
+    target = _HOST_ALIASES.get(host)
+    return urlunsplit(parts._replace(netloc=target)) if target else url
+
+
 def normalize_url(url: str) -> str:
     """Canonical form for dup comparison: lowercase scheme/host, no fragment,
     trailing slash collapsed, tracking params stripped, meaningful params kept."""
-    parts = urlsplit(_ensure_scheme(url))
+    parts = urlsplit(_ensure_scheme(canonical_url(url)))
     query = urlencode(
         [
             (k, v)

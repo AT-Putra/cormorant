@@ -101,3 +101,20 @@ def test_creator_id_from_profile_urls():
         "https://example.com/whatever",
     ):
         assert creator_id_from_url(url) in (None, "someone")
+
+
+def test_rednote_is_xhs_and_canonicalizes_to_xiaohongshu():
+    """rednote.com is Xiaohongshu's international rebrand -- same notes, and
+    yt-dlp's extractor matches xiaohongshu.com only."""
+    from app.util.platform import canonical_url, detect_platform, normalize_url
+
+    assert detect_platform("https://www.rednote.com/explore/65abc") == "xhs"
+    assert canonical_url("https://www.rednote.com/explore/65abc") == (
+        "https://www.xiaohongshu.com/explore/65abc"
+    )
+    # The same note on either host is one note, not two downloads.
+    assert normalize_url("https://www.rednote.com/explore/65abc") == normalize_url(
+        "https://www.xiaohongshu.com/explore/65abc"
+    )
+    # A host that merely contains the name is not the alias.
+    assert canonical_url("https://rednote.com.evil.test/x") == "https://rednote.com.evil.test/x"

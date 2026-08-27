@@ -148,6 +148,62 @@ def test_bad_cookie_rejected_no_row(authed_client, crypto_tmp, monkeypatch):
     assert rows == 0
 
 
+def test_xhs_accepts_a_rednote_export(authed_client, crypto_tmp, monkeypatch):
+    """One account, two domains.
+
+    Logging in at xiaohongshu.com from outside China hands the session to
+    rednote.com and leaves xiaohongshu.com looking logged out, so a rednote
+    export is the only one a user outside China can produce -- and the shape
+    check used to answer it with "these cookies are for another site".
+    """
+    client, _stub = authed_client
+    monkeypatch.setattr(cred_mod.ytdlp, "probe", ProbeOk())
+
+    r = client.post("/api/credentials/xhs", json={"cookie_text": _netscape(".rednote.com")})
+
+    assert r.status_code == 200
+
+
+def test_xhs_still_rejects_an_unrelated_domain(authed_client, crypto_tmp, monkeypatch):
+    """Widening to two domains must not widen to any domain."""
+    client, _stub = authed_client
+    monkeypatch.setattr(cred_mod.ytdlp, "probe", ProbeOk())
+
+    r = client.post("/api/credentials/xhs", json={"cookie_text": _netscape(".example.com")})
+
+    assert r.status_code == 400
+    assert "xiaohongshu.com or rednote.com" in r.json()["detail"]
+
+
+def test_mirror_copies_a_session_onto_the_domain_the_extractor_calls():
+    """A jar only offers a cookie to the domain its line names, and yt-dlp's
+    XiaoHongShu extractor requests xiaohongshu.com -- so an unmirrored rednote
+    export is accepted, stored, handed over, and then ignored on every call."""
+    out = cred_mod.mirror_cookie_domains("xhs", _netscape(".rednote.com", "web_session", "s1"))
+    domains = {d for d, _ in cred_mod._cookie_entries(out)}
+
+    assert domains == {"rednote.com", "xiaohongshu.com"}
+    assert out.startswith("# Netscape HTTP Cookie File")
+    assert out.count("s1") == 2
+
+
+def test_mirror_leaves_single_domain_platforms_alone():
+    text = _netscape(".bilibili.com")
+
+    assert cred_mod.mirror_cookie_domains("bilibili", text) == text
+
+
+def test_mirror_does_not_duplicate_an_already_paired_export():
+    """A browser logged into both hosts exports both lines already."""
+    paired = _netscape(".rednote.com", "web_session", "s1") + _netscape(
+        ".xiaohongshu.com", "web_session", "s1"
+    ).splitlines()[-1] + chr(10)
+
+    out = cred_mod.mirror_cookie_domains("xhs", paired)
+
+    assert len(cred_mod._cookie_entries(out)) == 2
+
+
 def test_list_never_returns_blob(authed_client, crypto_tmp, monkeypatch):
     client, _stub = authed_client
     monkeypatch.setattr(cred_mod.ytdlp, "probe", ProbeOk())
