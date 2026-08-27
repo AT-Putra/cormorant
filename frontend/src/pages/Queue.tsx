@@ -134,6 +134,22 @@ function fmtElapsed(iso: string | null): string {
 }
 
 const RECORDING_ACTIVE = "recording";
+const RECENT_RECORDING_MS = 24 * 60 * 60 * 1000;
+
+// A capture in flight always earns its space. A finished one stops being news:
+// this panel answers "what is happening right now", and nothing prunes
+// live_recordings, so without a window a failure from last week sits here
+// forever -- outliving the file it refers to.  Activity and Library keep the
+// permanent record.
+function visibleRecordings(rows: Recording[]): Recording[] {
+  const cutoff = Date.now() - RECENT_RECORDING_MS;
+  return rows.filter((r) => {
+    if (r.status === RECORDING_ACTIVE) return true;
+    const stamp = r.ended_at ?? r.started_at;
+    // No usable timestamp: not current by any reading, so let it go.
+    return stamp ? toDate(stamp).getTime() >= cutoff : false;
+  });
+}
 
 async function copyText(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
@@ -370,7 +386,7 @@ export default function Queue() {
       {/* Recordings had no surface at all: /api/recordings, stop and retry all
           existed, but nothing rendered them, so a capture running for hours
           was invisible and there was no way to end it from the UI. */}
-      {recordings.length > 0 && (
+      {visibleRecordings(recordings).length > 0 && (
         <section className="space-y-2">
           <h2 className="flex items-center gap-2 px-1 text-sm font-medium tracking-wide text-ink-dim uppercase">
             <span aria-hidden className="h-4 w-1 rounded-full bg-gradient-to-b from-accent to-accent-2" />
@@ -379,7 +395,7 @@ export default function Queue() {
               <span className="dot-live ml-1 text-cyan-300" />
             )}
           </h2>
-          {recordings.slice(0, 6).map((r) => {
+          {visibleRecordings(recordings).slice(0, 6).map((r) => {
             const isLive = r.status === RECORDING_ACTIVE;
             return (
               <div key={r.id} className="card flex items-center justify-between gap-3 p-4">
