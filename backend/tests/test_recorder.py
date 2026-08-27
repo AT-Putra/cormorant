@@ -97,6 +97,24 @@ def no_real_signals(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def fake_remux(monkeypatch):
+    """No ffmpeg in tests, same rule as no_real_spawn.
+
+    Copies the bytes rather than returning a bare True, so a test can tell a
+    finalized capture from a file that was never written. The failure path has
+    its own test that overrides this.
+    """
+
+    async def _remux(src, dst):
+        if not src.exists():
+            return False
+        dst.write_bytes(src.read_bytes())
+        return True
+
+    monkeypatch.setattr(rec_mod, "remux_to_mp4", _remux)
+
+
 @pytest.fixture
 async def sup():
     s = RecorderSupervisor()
@@ -238,6 +256,82 @@ async def test_two_recordings_same_room_different_paths(sup, db, monkeypatch):
     }
 
 
+async def test_capture_lands_in_flv_and_finalizes_to_mp4(sup, db, monkeypatch):
+    """The engine is handed .flv; the library gets .mp4.
+
+    A cut MP4 has no moov atom and will not open, so the bytes must land in
+    FLV -- but the engines write the raw stream, so shipping that file as
+    .mp4 produced FLV bytes with an .mp4 name and duration 0.
+    """
+    out = pin_out(monkeypatch, "cap.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    targets: list[str] = []
+    script_spawns(monkeypatch, [FakeProc(exit_code=0)])
+    # After script_spawns, or this binds the no_real_spawn guard instead.
+    real_spawn = rec_mod.asyncio.create_subprocess_exec
+
+    async def spawn_touch(*cmd, **kwargs):
+        argv = list(cmd)
+        targets.append(argv[argv.index("-o") + 1])
+        out.with_suffix(".flv").write_bytes(b"0" * 64)
+        return await real_spawn(*cmd, **kwargs)
+
+    monkeypatch.setattr(rec_mod.asyncio, "create_subprocess_exec", spawn_touch)
+
+    rid = await make_recording(db)()
+    await asyncio.wait_for(sup.start_recording(rid), timeout=5)
+
+    assert all(t.endswith(".flv") for t in targets)
+    assert out.is_file()  # finalized
+    assert not out.with_suffix(".flv").exists()  # capture dropped after remux
+    rec = await fetch(db, rid)
+    assert rec.output_path == str(out)
+
+
+async def test_failed_remux_keeps_and_registers_the_capture(sup, db, monkeypatch):
+    """Losing the container is not a reason to lose the recording."""
+    out = pin_out(monkeypatch, "keep.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    async def _fails(src, dst):
+        return False
+
+    monkeypatch.setattr(rec_mod, "remux_to_mp4", _fails)
+    script_spawns(monkeypatch, [FakeProc(exit_code=0)])
+    real_spawn = rec_mod.asyncio.create_subprocess_exec
+
+    async def spawn_touch(*cmd, **kwargs):
+        out.with_suffix(".flv").write_bytes(b"0" * 64)
+        return await real_spawn(*cmd, **kwargs)
+
+    monkeypatch.setattr(rec_mod.asyncio, "create_subprocess_exec", spawn_touch)
+
+    rid = await make_recording(db)()
+    await asyncio.wait_for(sup.start_recording(rid), timeout=5)
+
+    rec = await fetch(db, rid)
+    assert rec.status == "finished"
+    assert rec.output_path == str(out.with_suffix(".flv"))
+    assert out.with_suffix(".flv").is_file()
+
+
+def test_mp4_copy_args_tags_hevc_and_leaves_h264_alone(monkeypatch, tmp_path):
+    """hev1 is the mp4 muxer's default and the reason a fine HEVC file plays
+    as a black frame; hvc1 on an H.264 stream would break one that worked."""
+    src = tmp_path / "c.flv"
+    src.write_bytes(b"x")
+
+    monkeypatch.setattr(rec_mod, "_video_codec", lambda p: "hevc")
+    assert rec_mod.mp4_copy_args(src)[-2:] == ["-tag:v", "hvc1"]
+
+    monkeypatch.setattr(rec_mod, "_video_codec", lambda p: "h264")
+    assert "-tag:v" not in rec_mod.mp4_copy_args(src)
+
+    # ffprobe missing or silent: copy anyway rather than refusing to finalize.
+    monkeypatch.setattr(rec_mod, "_video_codec", lambda p: "")
+    assert "-tag:v" not in rec_mod.mp4_copy_args(src)
+
+
 async def _all_rec_ids(db):
     async with db.async_session() as s:
         rows = (await s.execute(select(models.LiveRecording))).scalars().all()
@@ -258,7 +352,7 @@ async def test_supervise_success_marks_finished_writes_library(sup, db, monkeypa
     real_spawn = rec_mod.asyncio.create_subprocess_exec
 
     async def spawn_touch(*cmd, **kwargs):
-        out.write_bytes(b"0" * 128)
+        out.with_suffix(".flv").write_bytes(b"0" * 128)
         return await real_spawn(*cmd, **kwargs)
 
     monkeypatch.setattr(rec_mod.asyncio, "create_subprocess_exec", spawn_touch)
@@ -301,7 +395,7 @@ async def test_supervise_fallback_to_streamlink_on_failure(sup, db, monkeypatch)
 
     async def spawn_touch(*cmd, **kwargs):
         if cmd[0] == "streamlink":
-            out.write_bytes(b"1" * 64)
+            out.with_suffix(".flv").write_bytes(b"1" * 64)
         return await second_spawn(*cmd, **kwargs)
 
     monkeypatch.setattr(rec_mod.asyncio, "create_subprocess_exec", spawn_touch)

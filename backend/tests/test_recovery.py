@@ -35,7 +35,7 @@ def test_orphan_candidates_finds_parts_only(tmp_path):
 
 def test_recovered_name():
     p = Path("/m/live_x.flv.part")
-    assert rec.recovered_name(p).name == "live_x_recovered.flv"
+    assert rec.recovered_name(p).name == "live_x_recovered.mp4"
 
 
 # ---- sweep -------------------------------------------------------------------
@@ -98,16 +98,18 @@ def test_sweep_recovers_orphan_skips_active(media_root, monkeypatch):
     def fake_run(cmd, **kw):
         cmds.append(cmd)
         Path(cmd[-1]).write_bytes(b"FLVfake")
-        return SimpleNamespace(returncode=0)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(rec.subprocess, "run", fake_run)
 
     n = asyncio.run(rec.recovery.sweep_once())
     assert n == 1
-    assert (orphan_dir / "live_old_recovered.flv").is_file()
+    assert (orphan_dir / "live_old_recovered.mp4").is_file()
     assert not orphan.exists()  # source dropped after successful remux
     assert growing.exists()  # claimed by the active recording → untouched
-    assert len(cmds) == 1
+    # Two invocations now: mp4_copy_args ffprobes the source for its codec
+    # before the copy, and both run through the same patched subprocess.run.
+    assert len([c for c in cmds if c[0] == rec.ffmpeg]) == 1
 
     # Row registered exactly once; second sweep is a no-op.
     from sqlalchemy import select
@@ -122,7 +124,7 @@ def test_sweep_recovers_orphan_skips_active(media_root, monkeypatch):
                 (
                     await s.execute(
                         select(LibraryItem).where(
-                            LibraryItem.file_path == str(orphan_dir / "live_old_recovered.flv")
+                            LibraryItem.file_path == str(orphan_dir / "live_old_recovered.mp4")
                         )
                     )
                 )

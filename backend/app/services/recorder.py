@@ -24,6 +24,7 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -50,8 +51,78 @@ def _db():
 # ---- pure helpers (unit-tested, no I/O) -------------------------------------
 
 
+# Live capture writes FLV and finalizes to MP4, in two steps for two reasons.
+# A cut MP4 has no moov atom and is unplayable, while a truncated FLV plays up
+# to the cut -- so the bytes have to land in FLV. But the engines write the raw
+# stream, so naming that file .mp4 did not make it one: TikTok captures were
+# FLV bytes with an .mp4 extension, duration 0, and the ones recovery rescued
+# stayed FLV -- HEVC-in-FLV, the codec id 12 extension ffmpeg itself only
+# learned in 8.0, which VLC cannot demux at all. No picture, no sound.
+FFMPEG = "ffmpeg"
+FFPROBE = "ffprobe"
+
+
+def capture_filename(started_at: datetime) -> str:
+    return f"live_{started_at:%Y%m%d_%H%M%S}.flv"
+
+
 def output_filename(started_at: datetime) -> str:
     return f"live_{started_at:%Y%m%d_%H%M%S}.mp4"
+
+
+def _video_codec(src: Path) -> str:
+    """ffprobe's name for the first video stream; "" when it cannot say."""
+    try:
+        out = subprocess.run(
+            [FFPROBE, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1",
+             str(src)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (out.stdout or "").strip()
+
+
+def mp4_copy_args(src: Path) -> list[str]:
+    """-c copy into MP4, with the video tag that keeps HEVC playable.
+
+    The mp4 muxer tags HEVC 'hev1' by default; VLC, QuickTime and most TVs
+    want 'hvc1' and give a black frame or nothing for 'hev1'. Only for HEVC:
+    stamping hvc1 on an H.264 stream would break a file that already worked.
+    """
+    args = ["-c", "copy", "-movflags", "+faststart"]
+    if _video_codec(src) == "hevc":
+        args += ["-tag:v", "hvc1"]
+    return args
+
+
+async def remux_to_mp4(src: Path, dst: Path) -> bool:
+    """Copy the capture into a real MP4. True when dst is usable.
+
+    Never destructive on failure: the caller keeps the FLV, which is playable
+    on its own for H.264 and at least holds the bytes for HEVC.
+    """
+    def _run() -> int:
+        return subprocess.run(
+            [FFMPEG, "-y", "-err_detect", "ignore_err", "-i", str(src),
+             *mp4_copy_args(src), str(dst)],
+            capture_output=True,
+            timeout=3600,
+        ).returncode
+
+    try:
+        rc = await asyncio.to_thread(_run)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("remux of %s raised %s", src.name, exc)
+        return False
+    if rc != 0 or not dst.exists() or dst.stat().st_size == 0:
+        dst.unlink(missing_ok=True)
+        log.warning("remux of %s failed (rc=%s)", src.name, rc)
+        return False
+    return True
 
 
 def recording_output_path(platform: str, creator: str, started_at: datetime) -> Path:
@@ -267,6 +338,7 @@ class RecorderSupervisor:
             return
 
         out_path = recording_output_path(rec.platform, rec.creator, rec.started_at)
+        capture_path = out_path.with_suffix(".flv")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         events.publish({"type": "recording.started", "recording_id": recording_id})
 
@@ -289,7 +361,7 @@ class RecorderSupervisor:
                 quality = (await aget_settings(settings_session)).default_quality
             chain = engine_chain(
                 rec.room_url,
-                str(out_path),
+                str(capture_path),
                 str(cookiefile) if cookiefile else None,
                 quality,
             )
@@ -311,19 +383,33 @@ class RecorderSupervisor:
             if cookiefile:
                 cookiefile.unlink(missing_ok=True)
 
-        produced = out_path.exists() and out_path.stat().st_size > 0
+        produced = capture_path.exists() and capture_path.stat().st_size > 0
+        # Finalize even for a user stop: an intentionally ended recording is
+        # still a recording someone wants to watch.
+        final_path = await self._finalize_container(capture_path, out_path) if produced else None
         intended = self._intended.pop(recording_id, None) or (
             "ended" if chain_broken_by_stop else None
         )
 
         if intended:
-            await self._finalize(recording_id, intended, out_path if produced else None, None)
+            await self._finalize(recording_id, intended, final_path, None)
         elif rc == 0 and produced:
-            await self._finalize(recording_id, "finished", out_path, None)
+            await self._finalize(recording_id, "finished", final_path, None)
         else:
             await self._finalize(
                 recording_id, "failed", None, err or "engine produced no output"
             )
+
+    async def _finalize_container(self, capture: Path, dst: Path) -> Path:
+        """FLV capture -> MP4 for the library. Returns what to register.
+
+        A failed remux keeps the FLV and registers that: a file the user has
+        to work to open beats a recording that silently is not there.
+        """
+        if await remux_to_mp4(capture, dst):
+            capture.unlink(missing_ok=True)
+            return dst
+        return capture
 
     async def _finalize(
         self,

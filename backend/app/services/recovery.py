@@ -21,6 +21,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app import models
+from app.services.recorder import mp4_copy_args
 from app.services.ytdlp import _sanitize
 
 log = logging.getLogger(__name__)
@@ -59,9 +60,15 @@ def orphan_candidates(root: Path) -> list[Path]:
 
 
 def recovered_name(part: Path) -> Path:
-    """live_x.flv.part -> live_x_recovered.flv (remux always lands in flv)."""
+    """live_x.flv.part -> live_x_recovered.mp4.
+
+    Lands in MP4, not FLV: an orphan is usually a TikTok capture, and TikTok
+    serves its top tier as HEVC-in-FLV -- which ffmpeg can read but VLC cannot
+    demux, so a rescued .flv opened to no picture and no sound. Same bytes,
+    container players understand.
+    """
     base = part.with_suffix("")  # drop .part -> live_x.flv
-    return base.with_name(f"{base.stem}_recovered.flv")
+    return base.with_name(f"{base.stem}_recovered.mp4")
 
 
 async def _size_stable(path: Path) -> bool:
@@ -82,7 +89,7 @@ async def _size_stable(path: Path) -> bool:
 
 
 async def remux_and_register(part: Path) -> models.LibraryItem | None:
-    """ffmpeg -c copy the orphan into *_recovered.flv; register LibraryItem.
+    """ffmpeg -c copy the orphan into *_recovered.mp4; register LibraryItem.
 
     Returns None when nothing was produced or the row already existed.
     """
@@ -102,8 +109,7 @@ async def remux_and_register(part: Path) -> models.LibraryItem | None:
                 "ignore_err",
                 "-i",
                 str(part),
-                "-c",
-                "copy",
+                *mp4_copy_args(part),
                 str(final),
             ],
             capture_output=True,
