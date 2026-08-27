@@ -96,10 +96,24 @@ def create_app() -> FastAPI:
 
         from fastapi.responses import FileResponse
 
+        dist_root = dist.resolve()
+
         @app.get("/{full_path:path}", include_in_schema=False)
         async def spa_fallback(full_path: str):
             if full_path.startswith("api/"):
                 raise HTTPException(status_code=404, detail="Not Found")
+            # vite copies public/ into dist's ROOT, not into assets/, so
+            # favicon.svg and icons.svg are reachable only through this route.
+            # Falling straight through to index.html answered them 200 with
+            # text/html, which a browser quietly discards -- no favicon, no
+            # broken-image, nothing in the console to notice.
+            candidate = (dist_root / full_path).resolve()
+            if (
+                full_path
+                and candidate.is_relative_to(dist_root)  # full_path is user input
+                and candidate.is_file()
+            ):
+                return FileResponse(candidate)
             return FileResponse(index_file)
 
     return app
