@@ -19,6 +19,9 @@ def _probe_info():
     return {
         "title": "Sample Video",
         "duration": 61.5,
+        # yt-dlp runs format selection even under skip_download, and reports
+        # the merged pair it intends to mux.
+        "format_id": "137+140",
         "formats": [
             {"format_id": "sb0", "ext": "mhtml", "vcodec": "none", "acodec": "none",
              "tbr": 50},
@@ -38,7 +41,7 @@ def _probe_info():
 def test_probe_filters_and_sorts_formats(client, monkeypatch):
     c, _stub, dl = client
     monkeypatch.setattr(
-        dl.ytdlp, "probe", lambda url, cookiefile=None: _probe_info()
+        dl.ytdlp, "probe", lambda url, cookiefile=None, **kw: _probe_info()
     )
 
     r = c.post("/api/downloads/probe", json={"url": "https://www.bilibili.com/video/BV1xx411c7XX"})
@@ -57,6 +60,58 @@ def test_probe_filters_and_sorts_formats(client, monkeypatch):
     # Codec/fps/bitrate reach the client: the quality dropdown labels entries
     # with them, so two same-resolution formats are told apart by codec.
     assert (f137["vcodec"], f137["acodec"], f137["fps"]) == ("avc1.640028", "none", 30)
+
+
+def test_probe_reports_what_best_available_resolves_to(client, monkeypatch):
+    """The dropdown marks a row as best; the backend decides which one."""
+    c, _stub, dl = client
+    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None, **kw: _probe_info())
+
+    r = c.post("/api/downloads/probe", json={"url": "https://www.bilibili.com/video/BV1xx411c7XX"})
+
+    assert r.status_code == 200
+    assert r.json()["best_format_id"] == "137+140"
+
+
+def test_probe_selection_runs_under_the_configured_cap(client, monkeypatch):
+    """'Best available' is the uncapped-probe answer only when no cap is set.
+
+    build_opts caps a no-format_id download with default_quality, so a probe
+    that skipped the cap would mark a 4K row as best on an account capped to
+    1080p -- and the download would then quietly fetch something else.
+    """
+    c, _stub, dl = client
+    seen: dict = {}
+
+    def _capture(url, cookiefile=None, **kw):
+        seen.update(kw)
+        return _probe_info()
+
+    monkeypatch.setattr(dl.ytdlp, "probe", _capture)
+    assert c.put("/api/settings", json={"default_quality": "1080p"}).status_code == 200
+
+    r = c.post("/api/downloads/probe", json={"url": "https://www.bilibili.com/video/BV1xx411c7XX"})
+
+    assert r.status_code == 200
+    assert seen["format_sort"] == dl.ytdlp.quality_sort("1080p")
+    assert seen["format_sort"] is not None
+
+
+def test_probe_without_a_cap_passes_no_sort(client, monkeypatch):
+    """The default is 'best', which quality_sort answers with None -- yt-dlp's
+    own ordering, not a sort string that happens to mean the same thing."""
+    c, _stub, dl = client
+    seen: dict = {}
+
+    def _capture(url, cookiefile=None, **kw):
+        seen.update(kw)
+        return _probe_info()
+
+    monkeypatch.setattr(dl.ytdlp, "probe", _capture)
+
+    c.post("/api/downloads/probe", json={"url": "https://www.bilibili.com/video/BV1xx411c7XX"})
+
+    assert seen["format_sort"] is None
 
 
 def _thin_probe_info():
@@ -80,7 +135,7 @@ def test_thin_formats_resurface_when_nothing_clears_the_floor(client, monkeypatc
     picker behind formats.length > 0, so that reads as a dropdown that
     silently isn't there."""
     c, _stub, dl = client
-    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None: _thin_probe_info())
+    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None, **kw: _thin_probe_info())
 
     r = c.post("/api/downloads/probe", json={"url": "https://www.bilibili.com/video/BV1xx411c7XX"})
     assert r.status_code == 200
@@ -93,7 +148,7 @@ def test_thin_formats_stay_demoted_when_better_exist(client, monkeypatch):
     """The floor is still a preference: nothing thin leaks in alongside real
     ladders."""
     c, _stub, dl = client
-    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None: _probe_info())
+    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None, **kw: _probe_info())
 
     r = c.post("/api/downloads/probe", json={"url": "https://www.bilibili.com/video/BV1xx411c7XX"})
     ids = [f["format_id"] for f in r.json()["formats"]]
@@ -106,7 +161,7 @@ def test_storyboard_only_still_yields_nothing(client, monkeypatch):
     monkeypatch.setattr(
         dl.ytdlp,
         "probe",
-        lambda url, cookiefile=None: {
+        lambda url, cookiefile=None, **kw: {
             "title": "SB only",
             "formats": [
                 {"format_id": "sb0", "ext": "mhtml", "vcodec": "none",
@@ -134,7 +189,7 @@ def _live_probe_info():
 
 def test_probe_keeps_live_formats_with_tier_and_protocol(client, monkeypatch):
     c, _stub, dl = client
-    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None: _live_probe_info())
+    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None, **kw: _live_probe_info())
 
     r = c.post("/api/downloads/probe", json={"url": "https://live.bilibili.com/23630605"})
     assert r.status_code == 200
@@ -168,7 +223,7 @@ def test_create_job_queues_and_lists(client, monkeypatch):
     monkeypatch.setattr(
         dl.ytdlp,
         "probe",
-        lambda url, cookiefile=None: {"title": "My Post", "uploader": "creatorA"},
+        lambda url, cookiefile=None, **kw: {"title": "My Post", "uploader": "creatorA"},
     )
 
     r = c.post("/api/downloads", json={"url": "https://www.tiktok.com/@someuser/video/123"})
@@ -216,7 +271,7 @@ async def _set_job_status(jid, status):
 
 def test_pause_resume_cancel_retry_transitions(client, monkeypatch):
     c, stub, dl = client
-    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None: {"title": "X"})
+    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None, **kw: {"title": "X"})
 
     r = c.post("/api/downloads", json={"url": "https://www.instagram.com/reel/Cabc123/"})
     jid = r.json()["id"]
@@ -265,7 +320,7 @@ def test_unknown_action_and_missing_job(client):
 
 def test_delete_job_removes_row_and_cancels_active(client, monkeypatch):
     c, stub, dl = client
-    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None: {"title": "X"})
+    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None, **kw: {"title": "X"})
 
     r = c.post("/api/downloads", json={"url": "https://www.instagram.com/reel/Cabc123/"})
     jid = r.json()["id"]

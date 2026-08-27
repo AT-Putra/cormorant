@@ -5,6 +5,7 @@ asyncio.to_thread; the event loop never touches the extractor.
 """
 
 import asyncio
+import functools
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
@@ -75,14 +76,26 @@ def _quality_options(info: dict) -> list[schemas.QualityOption]:
 
 
 @router.post("/probe", response_model=schemas.ProbeResult)
-async def probe_url(body: schemas.ProbeRequest) -> schemas.ProbeResult:
+async def probe_url(
+    body: schemas.ProbeRequest, session: AsyncSession = Depends(get_session)
+) -> schemas.ProbeResult:
     platform = detect_platform(body.url)
     if not platform:
         raise HTTPException(400, detail="Unsupported URL")
     cookiefile = await aget_cookiefile(platform)
+    # The dropdown's 'Best available' entry is the no-format_id download path,
+    # which build_opts caps with the default quality -- so the probe has to be
+    # asked the same question, or it marks a tier the download will not take.
+    settings = await aget_settings(session)
+    sort = ytdlp.quality_sort(settings.default_quality)
     try:
         info = await asyncio.to_thread(
-            ytdlp.probe, body.url, str(cookiefile) if cookiefile else None
+            functools.partial(
+                ytdlp.probe,
+                body.url,
+                str(cookiefile) if cookiefile else None,
+                format_sort=sort,
+            )
         )
     except Exception as exc:
         raise HTTPException(400, detail=f"Probe failed: {exc}") from exc
@@ -94,6 +107,7 @@ async def probe_url(body: schemas.ProbeRequest) -> schemas.ProbeResult:
         title=info.get("title"),
         duration=info.get("duration"),
         formats=_quality_options(info),
+        best_format_id=(str(info["format_id"]) if info.get("format_id") else None),
     )
 
 

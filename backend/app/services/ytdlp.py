@@ -160,6 +160,7 @@ def probe(
     *,
     extract_flat: bool = False,
     playlist_items: str | None = None,
+    format_sort: list[str] | None = None,
 ) -> dict:
     """Full extraction, or flat listing (channels/timelines) when
     extract_flat=True. Synchronous — run via to_thread.
@@ -185,6 +186,12 @@ def probe(
         opts["noplaylist"] = True
     if playlist_items:
         opts["playlist_items"] = playlist_items
+    if format_sort:
+        # extract_info runs format SELECTION even with skip_download, and the
+        # id it lands on is what the probe reports as best. Without the same
+        # sort build_opts uses, that answer describes an uncapped download the
+        # user is not going to get.
+        opts["format_sort"] = format_sort
     if cookiefile:
         opts["cookiefile"] = cookiefile
     with YoutubeDL(opts) as ydl:

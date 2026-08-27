@@ -28,6 +28,10 @@ export interface ProbeResult {
   title: string;
   duration: number | null;
   formats: QualityOption[];
+  /** What "Best available" resolves to under the configured quality cap.
+   *  A merged id ("137+140") when yt-dlp plans to mux, so it is not always
+   *  one of the ids in `formats`. Null when the probe reported no selection. */
+  best_format_id?: string | null;
 }
 
 export interface DownloadJob {

@@ -30,6 +30,10 @@ class ProbeResult(BaseModel):
     title: str | None = None
     duration: float | None = None
     formats: list[QualityOption] = []
+    # What 'Best available' actually resolves to, under the configured quality
+    # cap. yt-dlp writes a merged id ('137+140') when it intends to mux, so
+    # this is not always one of the ids in formats.
+    best_format_id: str | None = None
 
 
 class DownloadJobCreate(BaseModel):

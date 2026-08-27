@@ -84,14 +84,26 @@ function qualityLabel(f: QualityOption): string {
 
 // Bilibili live serves the same tier from several CDN endpoints, so labels
 // collide; the raw format_id is appended only to the ones that would tie.
-function qualityLabels(formats: QualityOption[]): { format_id: string; label: string }[] {
+// `best` is the id "Best available" actually resolves to, cap included. When
+// yt-dlp plans to mux it reports a merged id ("137+140"), and then no single
+// row IS the pick — each half is only part of it, which the label has to say
+// rather than promising two different rows are each the best one.
+function qualityLabels(
+  formats: QualityOption[],
+  best?: string | null,
+): { format_id: string; label: string }[] {
   const labels = formats.map(qualityLabel);
   const seen = new Map<string, number>();
   labels.forEach((l) => seen.set(l, (seen.get(l) ?? 0) + 1));
-  return formats.map((f, i) => ({
-    format_id: f.format_id,
-    label: (seen.get(labels[i]) ?? 0) > 1 ? `${labels[i]} · ${f.format_id}` : labels[i],
-  }));
+  const chosen = new Set((best ?? "").split("+").filter(Boolean));
+  const suffix = chosen.size > 1 ? "part of best available" : "best available";
+  return formats.map((f, i) => {
+    const base = (seen.get(labels[i]) ?? 0) > 1 ? `${labels[i]} · ${f.format_id}` : labels[i];
+    return {
+      format_id: f.format_id,
+      label: chosen.has(f.format_id) ? `${base} · ${suffix}` : base,
+    };
+  });
 }
 
 // Backend stores naive UTC; tag with Z so Date parses the real instant.
@@ -271,7 +283,7 @@ export default function Queue() {
                 <span className="mb-1.5 block text-xs text-ink-faint">Quality (default: best)</span>
                 <select value={formatId} onChange={(e) => setFormatId(e.target.value)} className="input">
                   <option value="">Best available</option>
-                  {qualityLabels(probe.formats).map((o) => (
+                  {qualityLabels(probe.formats, probe.best_format_id).map((o) => (
                     <option key={o.format_id} value={o.format_id}>
                       {o.label}
                     </option>
