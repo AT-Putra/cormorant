@@ -46,12 +46,21 @@ def _rec_out(r: LiveRecording) -> dict:
 
 
 def _size_of(path: str | None) -> int | None:
+    """Bytes on disk, following the engine's in-flight name.
+
+    yt-dlp writes <name>.part and renames only when the capture ends, so for
+    the whole length of a recording the claimed path does not exist yet.
+    Reading just that reported no size for precisely the case this field is
+    here to answer -- is anything still arriving.
+    """
     if not path:
         return None
-    try:
-        return os.path.getsize(path)
-    except OSError:
-        return None
+    for candidate in (path, path + ".part"):
+        try:
+            return os.path.getsize(candidate)
+        except OSError:
+            continue
+    return None
 
 
 @router.post("/api/downloads/record-live", status_code=201)

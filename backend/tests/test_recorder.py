@@ -714,6 +714,20 @@ async def test_list_recordings_reports_bytes_on_disk(client, tmp_path):
     assert rows[0]["size_bytes"] == 4096
 
 
+async def test_list_recordings_sizes_an_in_flight_part_file(client, tmp_path):
+    """yt-dlp writes <name>.part and renames at the end, so during a capture
+    the claimed path does not exist -- the size has to follow the .part or it
+    reads as nothing for the entire recording."""
+    c, _rr = client
+    cap = tmp_path / "live.flv"
+    (tmp_path / "live.flv.part").write_bytes(b"0" * 2048)
+    await make_recording(api_db(), status="recording", output_path=str(cap))()
+
+    rows = c.get("/api/recordings").json()
+
+    assert rows[0]["size_bytes"] == 2048
+
+
 async def test_list_recordings_survives_a_vanished_file(client, tmp_path):
     """A path that no longer exists is a null size, not a 500."""
     c, _rr = client
