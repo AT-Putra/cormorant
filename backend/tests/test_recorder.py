@@ -17,6 +17,7 @@ from app import models
 from app.services import recorder as rec_mod
 from app.services.recorder import (
     RecorderSupervisor,
+    _signal_group as _real_signal_group,
     engine_chain,
     output_filename,
     recording_output_path,
@@ -78,11 +79,36 @@ def no_real_spawn(monkeypatch):
     monkeypatch.setattr(rec_mod.asyncio, "create_subprocess_exec", boom)
 
 
+@pytest.fixture(autouse=True)
+def no_real_signals(monkeypatch):
+    """The other half of no_real_spawn: FakeProc is not a process.
+
+    _signal_group's POSIX branch hands proc.pid to os.killpg, so under Linux
+    every stop test aimed a real syscall at a pid that had never existed --
+    ProcessLookupError, the fake never saw its SIGTERM, and its scripted delay
+    ran on. That is a stop path tested only on Windows, and on Linux (which is
+    what production runs) a hang rather than a failure. Deliver to the
+    stand-in instead; the real group semantics are covered by
+    test_signal_group_signals_the_whole_group_on_posix.
+    """
+
+    monkeypatch.setattr(
+        rec_mod, "_signal_group", lambda proc, sig: proc.send_signal(sig)
+    )
+
+
 @pytest.fixture
 async def sup():
     s = RecorderSupervisor()
     yield s
-    await s.shutdown()
+    # shutdown() gathers the supervision tasks, and a failed assertion can
+    # leave a stand-in "running" for its full scripted delay -- which is how
+    # one broken stop test cost a CI runner five minutes instead of failing in
+    # five seconds. The test has already failed by then; do not also hang.
+    try:
+        await asyncio.wait_for(s.shutdown(), timeout=10)
+    except asyncio.TimeoutError:
+        pass
 
 
 def make_recording(db, **kw):
@@ -356,6 +382,36 @@ async def test_stop_graceful_exit_within_window_no_kill(sup, db, monkeypatch):
     assert proc.returncode == 0
     rec = await fetch(db, rid)
     assert rec.status == "ended"  # intended stop, not 'finished'/'failed'
+
+
+def test_signal_group_signals_the_whole_group_on_posix(monkeypatch):
+    """The real _signal_group, which no_real_signals replaces everywhere else.
+
+    A recording's engine leads its own session, and the child holding the
+    output file is often not the pid we spawned (yt-dlp shells out to ffmpeg),
+    so a stop that reaches only proc.pid leaves the writer alive.
+    """
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(rec_mod.os, "name", "posix")
+    # raising=False: these two do not exist on the Windows dev box at all.
+    monkeypatch.setattr(rec_mod.os, "getpgid", lambda pid: 900 + pid, raising=False)
+    monkeypatch.setattr(
+        rec_mod.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)), raising=False
+    )
+
+    _real_signal_group(FakeProc(pid=7), signal.SIGTERM)
+
+    assert sent == [(907, signal.SIGTERM)]
+
+
+def test_signal_group_falls_back_to_the_handle_off_posix(monkeypatch):
+    """No process groups on Windows; the handle is all there is."""
+    monkeypatch.setattr(rec_mod.os, "name", "nt")
+    proc = FakeProc(pid=7)
+
+    _real_signal_group(proc, signal.SIGTERM)
+
+    assert proc.signals == [signal.SIGTERM]
 
 
 async def test_stop_between_engines_does_not_spawn_fallback(sup, db, monkeypatch):
