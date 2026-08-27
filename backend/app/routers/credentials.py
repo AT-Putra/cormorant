@@ -122,6 +122,13 @@ def mirror_cookie_domains(platform: str, cookie_text: str) -> str:
     accepted, stored, decrypted, handed to the engine -- and then ignored on
     every request, which looks exactly like cookies that do not work.
 
+    Measured, so the limits are known: with these twins present
+    xiaohongshu.com moves from "无登录信息" (no login info) to "登录已过期"
+    (login expired), so it reads the session and rejects it -- the two hosts
+    do not share one. What crosses is the device/anti-bot set (a1, webId,
+    xsecappid), not authentication. Gated content still needs a session
+    issued by the host being called.
+
     Same account, same company: rednote.com's certificate is issued to
     Xiaohongshu's own corporate entity. Duplicating the line is a local jar
     edit, not a credential sent anywhere new.
@@ -149,12 +156,22 @@ def mirror_cookie_domains(platform: str, cookie_text: str) -> str:
         )
         if base is None:
             continue
+        prefix = "#HttpOnly_" if raw.strip().startswith("#HttpOnly_") else ""
+        dotted = parts[0].removeprefix("#HttpOnly_").startswith(".")
         for other in wanted:
             if other == base or (other, parts[5]) in added:
                 continue
             added.add((other, parts[5]))
             twin = list(parts)
-            twin[0] = "." + other
+            # Swap the registrable suffix and keep the rest of the host, so a
+            # host-only cookie stays host-only. MozillaCookieJar refuses to
+            # load a file where the leading dot and the domain_specified flag
+            # disagree -- prefixing a dot onto a host-only line makes every
+            # engine call fail on an unreadable jar, not merely a logged-out
+            # one.
+            twin_host = host[: len(host) - len(base)] + other
+            twin[0] = prefix + ("." if dotted else "") + twin_host
+            twin[1] = "TRUE" if dotted else "FALSE"
             out.append(_TAB.join(twin))
     return _NL.join(out) + _NL
 

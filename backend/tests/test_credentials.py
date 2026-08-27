@@ -187,6 +187,35 @@ def test_mirror_copies_a_session_onto_the_domain_the_extractor_calls():
     assert out.count("s1") == 2
 
 
+def test_mirrored_jar_is_loadable_by_the_cookie_parser():
+    """MozillaCookieJar refuses a file whose leading dot and domain_specified
+    flag disagree, and yt-dlp loads cookiefiles with it -- so a twin built by
+    prefixing a dot onto a host-only cookie does not produce a logged-out
+    session, it produces an unreadable jar and an engine call that dies before
+    it starts. Host-only stays host-only; dotted stays dotted.
+    """
+    import tempfile
+    from http.cookiejar import MozillaCookieJar
+
+    TAB = chr(9)
+    NL = chr(10)
+    src = (
+        "# Netscape HTTP Cookie File" + NL
+        + TAB.join(["www.rednote.com", "FALSE", "/", "FALSE", "2000000000", "acw_tc", "v1"]) + NL
+        + TAB.join([".rednote.com", "TRUE", "/", "TRUE", "2000000000", "web_session", "v2"]) + NL
+    )
+
+    out = cred_mod.mirror_cookie_domains("xhs", src)
+
+    assert TAB.join(["www.xiaohongshu.com", "FALSE"]) in out
+    assert TAB.join([".xiaohongshu.com", "TRUE"]) in out
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
+        f.write(out)
+    jar = MozillaCookieJar(f.name)
+    jar.load(ignore_discard=True, ignore_expires=True)
+    assert len(jar) == 4
+
+
 def test_mirror_leaves_single_domain_platforms_alone():
     text = _netscape(".bilibili.com")
 
