@@ -2,6 +2,8 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+import os
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,7 +37,21 @@ def _rec_out(r: LiveRecording) -> dict:
         "ended_at": r.ended_at.isoformat() if r.ended_at else None,
         "output_path": r.output_path,
         "error": r.error,
+        # Bytes on disk right now. A 'recording' row with a size that climbs
+        # between polls is the only proof from outside the container that the
+        # capture is still alive; without it the UI cannot tell a running
+        # capture from one whose engine died an hour ago.
+        "size_bytes": _size_of(r.output_path),
     }
+
+
+def _size_of(path: str | None) -> int | None:
+    if not path:
+        return None
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None
 
 
 @router.post("/api/downloads/record-live", status_code=201)

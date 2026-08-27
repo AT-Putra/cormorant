@@ -696,6 +696,34 @@ async def test_list_recordings(client):
     assert rows[0]["origin"] == "manual"
 
 
+async def test_list_recordings_reports_bytes_on_disk(client, tmp_path):
+    """The only proof from outside the container that a capture is alive.
+
+    A 'recording' row whose size climbs between polls is running; one whose
+    size is frozen (or absent) is an engine that died. Nothing else in the
+    payload distinguishes them, which is why a capture could run for hours
+    with no way to tell.
+    """
+    c, _rr = client
+    cap = tmp_path / "live.flv"
+    cap.write_bytes(b"0" * 4096)
+    await make_recording(api_db(), status="recording", output_path=str(cap))()
+
+    rows = c.get("/api/recordings").json()
+
+    assert rows[0]["size_bytes"] == 4096
+
+
+async def test_list_recordings_survives_a_vanished_file(client, tmp_path):
+    """A path that no longer exists is a null size, not a 500."""
+    c, _rr = client
+    await make_recording(api_db(), status="failed", output_path=str(tmp_path / "gone.flv"))()
+
+    rows = c.get("/api/recordings").json()
+
+    assert rows[0]["size_bytes"] is None
+
+
 async def test_retry_only_interrupted(client, monkeypatch):
     c, rr = client
     adb = api_db()

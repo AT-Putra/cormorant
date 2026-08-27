@@ -69,6 +69,21 @@ export interface CredentialInfo {
   account_label: string | null;
 }
 
+export interface Recording {
+  id: number;
+  room_url: string;
+  platform: string;
+  creator: string;
+  origin: string;
+  status: string;
+  started_at: string | null;
+  ended_at: string | null;
+  output_path: string | null;
+  error: string | null;
+  /** Bytes on disk right now — climbs while the capture is alive. */
+  size_bytes?: number | null;
+}
+
 export interface AppSettings {
   folder_template: string;
   concurrency_cap: number;
@@ -143,6 +158,9 @@ export const api = {
   // downloads
   probe: (url: string) =>
     request<ProbeResult>("/api/downloads/probe", { method: "POST", body: JSON.stringify({ url }) }),
+  recordings: () => request<Recording[]>("/api/recordings"),
+  stopRecording: (id: number) =>
+    request<{ ok?: boolean }>(`/api/recordings/${id}/stop`, { method: "POST" }),
   createJob: (payload: {
     url: string;
     format_id?: string | null;

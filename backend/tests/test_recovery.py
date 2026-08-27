@@ -74,6 +74,56 @@ def _seed_recording(status: str, output_path: str | None):
     asyncio.run(_go())
 
 
+def test_recovery_announces_what_it_rescued(media_root, monkeypatch):
+    """A library item nobody started, with nothing in Activity explaining it,
+    is indistinguishable from a bug. Recovery used to publish nothing."""
+    root: Path = media_root
+    d = root / "tiktok" / "someone"
+    d.mkdir(parents=True)
+    part = d / "live_x.flv.part"
+    part.write_bytes(bytes(64))
+
+    published: list[dict] = []
+    monkeypatch.setattr(rec.events, "publish", published.append)
+    monkeypatch.setattr(rec.subprocess, "run", _ok_ffmpeg)
+
+    asyncio.run(rec.remux_and_register(part))
+
+    assert [e["type"] for e in published] == ["recording.recovered"]
+    assert published[0]["file"] == "live_x_recovered.mp4"
+    assert published[0]["source"] == "live_x.flv.part"
+    assert published[0]["creator"] == "someone"
+
+
+def test_recovery_announces_a_failed_remux(media_root, monkeypatch):
+    """A sweep failing every cycle must not look like a sweep never running."""
+    root: Path = media_root
+    d = root / "tiktok" / "someone"
+    d.mkdir(parents=True)
+    part = d / "live_y.flv.part"
+    part.write_bytes(bytes(64))
+
+    published: list[dict] = []
+    monkeypatch.setattr(rec.events, "publish", published.append)
+    monkeypatch.setattr(
+        rec.subprocess, "run", lambda cmd, **kw: SimpleNamespace(returncode=1, stdout="", stderr="")
+    )
+
+    assert asyncio.run(rec.remux_and_register(part)) is None
+
+    assert [e["type"] for e in published] == ["recording.recover_failed"]
+    assert published[0]["ffmpeg_rc"] == 1
+    assert part.exists()  # source kept for the next sweep
+
+
+def _ok_ffmpeg(cmd, **kw):
+    """subprocess.run stand-in: ffprobe answers nothing, ffmpeg writes output."""
+    if cmd[0].endswith("ffprobe"):
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    Path(cmd[-1]).write_bytes(b"MP4fake")
+    return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+
 def test_sweep_recovers_orphan_skips_active(media_root, monkeypatch):
     root: Path = media_root
     orphan_dir = root / "bili" / "creator"

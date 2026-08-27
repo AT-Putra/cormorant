@@ -5,6 +5,7 @@ import {
   type DownloadJob,
   type ProbeResult,
   type QualityOption,
+  type Recording,
 } from "../api/client";
 import ConfirmDialog from "../components/ConfirmDialog";
 
@@ -121,6 +122,19 @@ function fmtTime(iso: string): string {
   return d.toLocaleString(undefined, opts).replace(/ /g, " ");
 }
 
+// Live recordings have no percentage to show — nothing reports a total for a
+// stream that has not ended. Elapsed time next to a byte count that climbs
+// between polls is what tells a running capture from a dead engine.
+function fmtElapsed(iso: string | null): string {
+  if (!iso) return "—";
+  const secs = Math.max(0, Math.floor((Date.now() - toDate(iso).getTime()) / 1000));
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m ${secs % 60}s`;
+}
+
+const RECORDING_ACTIVE = "recording";
+
 async function copyText(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
   // Fallback for plain-http LAN access where the async clipboard is absent.
@@ -157,10 +171,16 @@ export default function Queue() {
   // Per-job live tick from the event bus; not persisted server-side.
   const [live, setLive] = useState<Record<number, { speed: number | null; bytes: number | null }>>({});
   const wsRef = useRef<WebSocket | null>(null);
+  const [recordings, setRecordings] = useState<Recording[]>([]);
+  // Re-render on a timer so elapsed time advances between events; a capture
+  // can run for hours without publishing anything at all.
+  const [, setTick] = useState(0);
 
   async function refresh() {
     try {
-      setJobs(await api.jobs());
+      const [j, r] = await Promise.all([api.jobs(), api.recordings()]);
+      setJobs(j);
+      setRecordings(r);
     } catch {
       /* auth redirect handled by app shell */
     }
@@ -170,7 +190,10 @@ export default function Queue() {
     refresh();
     const ws = openEventSocket((e) => {
       const type = e["type"] as string;
-      if (typeof type !== "string" || !type.startsWith("job.")) return;
+      if (typeof type !== "string") return;
+      // recording.* was dropped here, so a capture starting, ending or being
+      // rescued changed nothing on screen until a manual reload.
+      if (!type.startsWith("job.") && !type.startsWith("recording.")) return;
       // Live streams report no total, so percent stays 0 — carry speed and
       // byte count off the event so the row still shows movement.
       if (type === "job.progress" && typeof e["job_id"] === "number") {
@@ -186,8 +209,29 @@ export default function Queue() {
       refresh();
     });
     wsRef.current = ws;
-    return () => ws.close();
+    // 5s: fast enough that a stalled capture is obvious, slow enough that an
+    // idle page is not polling for nothing.
+    const timer = window.setInterval(() => {
+      setTick((n) => n + 1);
+      void refresh();
+    }, 5000);
+    return () => {
+      ws.close();
+      window.clearInterval(timer);
+    };
   }, []);
+
+  async function stopRecording(id: number) {
+    setBusy(true);
+    try {
+      await api.stopRecording(id);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function doProbe() {
     setError(null);
@@ -322,6 +366,62 @@ export default function Queue() {
           </p>
         )}
       </section>
+
+      {/* Recordings had no surface at all: /api/recordings, stop and retry all
+          existed, but nothing rendered them, so a capture running for hours
+          was invisible and there was no way to end it from the UI. */}
+      {recordings.length > 0 && (
+        <section className="space-y-2">
+          <h2 className="flex items-center gap-2 px-1 text-sm font-medium tracking-wide text-ink-dim uppercase">
+            <span aria-hidden className="h-4 w-1 rounded-full bg-gradient-to-b from-accent to-accent-2" />
+            Recordings
+            {recordings.some((r) => r.status === RECORDING_ACTIVE) && (
+              <span className="dot-live ml-1 text-cyan-300" />
+            )}
+          </h2>
+          {recordings.slice(0, 6).map((r) => {
+            const isLive = r.status === RECORDING_ACTIVE;
+            return (
+              <div key={r.id} className="card flex items-center justify-between gap-3 p-4">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-ink">
+                    {r.creator}
+                    <span className="ml-2 text-xs font-normal text-ink-faint">{r.platform}</span>
+                  </p>
+                  <p className="mt-0.5 text-xs text-ink-faint">
+                    {isLive ? (
+                      <>
+                        recording for {fmtElapsed(r.started_at)} · {fmtBytes(r.size_bytes)} on disk
+                      </>
+                    ) : (
+                      <>
+                        {r.status}
+                        {r.ended_at ? ` · ended ${fmtTime(r.ended_at)}` : ""}
+                        {r.size_bytes ? ` · ${fmtBytes(r.size_bytes)}` : ""}
+                      </>
+                    )}
+                  </p>
+                  {r.error && <p className="mt-1 text-xs text-rose-300">{r.error}</p>}
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <span className={`pill ${isLive ? "bg-cyan-950/40 text-cyan-300" : "bg-surface-3 text-ink-faint"}`}>
+                    {isLive ? "live" : r.status}
+                  </span>
+                  {isLive && (
+                    <button
+                      onClick={() => stopRecording(r.id)}
+                      disabled={busy}
+                      className="btn-secondary min-h-[36px] cursor-pointer rounded-lg px-3 py-1.5 text-xs text-ink-dim disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Stop
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </section>
+      )}
 
       <section className="space-y-2">
         <h2 className="flex items-center gap-2 px-1 text-sm font-medium tracking-wide text-ink-dim uppercase">

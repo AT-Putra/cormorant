@@ -21,6 +21,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app import models
+from app.services import events
 from app.services.recorder import mp4_copy_args
 from app.services.ytdlp import _sanitize
 
@@ -121,6 +122,11 @@ async def remux_and_register(part: Path) -> models.LibraryItem | None:
         # Remux failed: keep the .part so data isn't lost; retry next sweep.
         final.unlink(missing_ok=True)
         log.warning("recovery remux failed (%s) for %s", rc, part)
+        # Say so. A sweep that silently fails every cycle is indistinguishable
+        # from one that never ran.
+        events.publish(
+            {"type": "recording.recover_failed", "file": part.name, "ffmpeg_rc": rc}
+        )
         return None
 
     # Drop the source only once a playable copy exists.
@@ -150,6 +156,17 @@ async def remux_and_register(part: Path) -> models.LibraryItem | None:
         session.add(item)
         await session.commit()
     log.info("recovered orphan %s -> %s", part.name, final.name)
+    # Recovery used to register a library item and publish nothing, so a file
+    # nobody started appeared in the library with no way to find out why.
+    events.publish(
+        {
+            "type": "recording.recovered",
+            "file": final.name,
+            "source": part.name,
+            "size_bytes": item.size_bytes,
+            "creator": creator,
+        }
+    )
     return item
 
 
