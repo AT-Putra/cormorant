@@ -340,6 +340,17 @@ class RecorderSupervisor:
         out_path = recording_output_path(rec.platform, rec.creator, rec.started_at)
         capture_path = out_path.with_suffix(".flv")
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        # Claim the path before a byte is written. recovery decides a .part is
+        # an orphan by checking it against the output_path of every active
+        # recording -- and this column used to stay NULL until finalize, so a
+        # capture that was still running claimed nothing, and the sweep
+        # remuxed the file out from under its own engine and registered the
+        # result as a second, duplicate library item.
+        async with _db() as session:
+            claiming = await session.get(models.LiveRecording, recording_id)
+            if claiming is not None:
+                claiming.output_path = str(capture_path)
+                await session.commit()
         events.publish({"type": "recording.started", "recording_id": recording_id})
 
         me = asyncio.current_task()

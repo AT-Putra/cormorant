@@ -315,6 +315,32 @@ async def test_failed_remux_keeps_and_registers_the_capture(sup, db, monkeypatch
     assert out.with_suffix(".flv").is_file()
 
 
+async def test_capture_path_is_claimed_before_the_first_byte(sup, db, monkeypatch):
+    """recovery reads active recordings' output_path to decide what is an
+    orphan. While that stayed NULL until finalize, a running capture claimed
+    nothing and the sweep remuxed the file out from under its own engine."""
+    out = pin_out(monkeypatch, "claim.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    seen: list[str | None] = []
+    script_spawns(monkeypatch, [FakeProc(exit_code=0)])
+    real_spawn = rec_mod.asyncio.create_subprocess_exec
+
+    async def spawn_touch(*cmd, **kwargs):
+        seen.append((await fetch(db, rid)).output_path)
+        out.with_suffix(".flv").write_bytes(b"0" * 32)
+        return await real_spawn(*cmd, **kwargs)
+
+    monkeypatch.setattr(rec_mod.asyncio, "create_subprocess_exec", spawn_touch)
+
+    rid = await make_recording(db)()
+    await asyncio.wait_for(sup.start_recording(rid), timeout=5)
+
+    # Claimed as the FLV the engine actually writes, not the finalized name.
+    assert seen == [str(out.with_suffix(".flv"))]
+    # ...and replaced by the finalized path once the capture is done.
+    assert (await fetch(db, rid)).output_path == str(out)
+
+
 def test_mp4_copy_args_tags_hevc_and_leaves_h264_alone(monkeypatch, tmp_path):
     """hev1 is the mp4 muxer's default and the reason a fine HEVC file plays
     as a black frame; hvc1 on an H.264 stream would break one that worked."""
