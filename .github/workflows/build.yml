@@ -18,6 +18,11 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A hung suite must not sit on a runner for six hours (the default). The
+    # inner `timeout` is the useful one: it kills pytest while the log still
+    # shows which test was last started, where a job-level timeout just
+    # truncates. Both, because the inner one cannot catch a hung runner.
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -26,7 +31,7 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements.txt
       - run: pip install -r backend/requirements.txt
-      - run: python -m pytest tests/ -q
+      - run: timeout 300 python -m pytest tests/ -v
         working-directory: backend
 
   image:
