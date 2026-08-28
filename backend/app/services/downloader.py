@@ -11,6 +11,7 @@ import asyncio
 import logging
 import queue as pyqueue
 import threading
+import time
 from pathlib import Path
 
 from sqlalchemy import select
@@ -54,6 +55,10 @@ def free_space_pct(path: Path) -> float:
         return 0.0
 
 
+def _size_of(path: Path) -> int:
+    return path.stat().st_size
+
+
 def part_snapshot(job) -> set[str]:
     """.part files already in this job's output dir before its engine ran.
 
@@ -68,6 +73,19 @@ def part_snapshot(job) -> set[str]:
         return {str(p) for p in ytdlp.output_dir(job).glob("*.part") if p.is_file()}
     except OSError:
         return set()
+
+
+def _arg_path(arg: str) -> str:
+    """The filesystem path an engine argument refers to.
+
+    yt-dlp hands ffmpeg its output as ffmpeg's own URL form -- verified
+    against the running image, _ffmpeg_filename_argument turns
+    /media/x/live.mp4.part into file:/media/x/live.mp4.part, because a bare
+    path containing ':' would otherwise read as a protocol. Comparing raw
+    argv against the path therefore matched nothing, and cancel was inert for
+    the exact engine it was written to stop.
+    """
+    return arg[len("file:"):] if arg.startswith("file:") else arg
 
 
 def terminate_engine_children(part: Path) -> int:
@@ -93,11 +111,15 @@ def terminate_engine_children(part: Path) -> int:
         return 0
     for child in children:
         try:
-            if needle in (child.cmdline() or []):
-                child.terminate()
-                stopped += 1
+            argv = child.cmdline() or []
         except psutil.Error:
             continue  # already gone, or not ours to look at
+        if any(_arg_path(a) == needle for a in argv):
+            try:
+                child.terminate()
+                stopped += 1
+            except psutil.Error:
+                continue
     return stopped
 
 
@@ -112,6 +134,8 @@ class DownloadManager:
         self._live_retries: dict[int, int] = {}
         # Where each running job's engine is writing, so cancel can name it.
         self._job_parts: dict[int, Path] = {}
+        # Jobs whose engine has reported at least one progress hook of its own.
+        self._hook_seen: set[int] = set()
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -263,7 +287,7 @@ class DownloadManager:
                 self._consume_progress(job.id, progress_q)
             )
             first_bytes = asyncio.create_task(
-                self._promote_on_first_bytes(job, baseline)
+                self._report_from_disk(job, baseline)
             )
             try:
                 extra: dict = {
@@ -392,6 +416,7 @@ class DownloadManager:
                     consumer.cancel()
                 self._abort_events.pop(job.id, None)
                 self._cancelled.discard(job.id)
+                self._hook_seen.discard(job.id)
                 # Keep the claim while a re-queued retry or a paused job may
                 # still resume onto the same .part; drop it once the run has
                 # settled, so the next one starts fresh.
@@ -502,30 +527,58 @@ class DownloadManager:
         except OSError:
             log.warning("temp cleanup failed for job %s", job.id)
 
-    async def _promote_on_first_bytes(
+    async def _report_from_disk(
         self, job: models.DownloadJob, baseline: set[str]
     ) -> None:
-        """Flip 'probing' -> 'downloading' for engines that report no progress.
+        """Status, size and rate for an engine that reports none of its own.
 
         yt-dlp hands a LIVE m3u8 to FFmpegFD, and ExternalFD fires exactly one
-        progress hook -- 'finished', after the capture is over. So the
-        hook-driven promotion in _consume_progress never runs for a tiktok
-        live, whose top tiers are all HLS: ffmpeg captured happily for hours
-        while the Queue showed the job stuck in 'probing' with no error and no
-        progress. Bilibili lives were fine by luck -- their FLV ladder is plain
-        https, which goes through HttpFD and does report bytes.
+        progress hook -- 'finished', after the capture is over. Everything the
+        Queue shows about a running job comes from those hooks, so a tiktok
+        live (whose top tiers are all HLS) sat at 'probing', 0 MB and no rate
+        for its entire run while ffmpeg wrote gigabytes. Bilibili was fine by
+        luck: its FLV ladder is plain https, which goes through HttpFD and
+        does report bytes.
 
-        Bytes on disk are that same signal without the engine's cooperation.
+        The .part on disk carries the same two facts the panel wants, so read
+        them there and publish the events the engine will not. This goes quiet
+        the moment a real hook arrives, so an engine that does report keeps
+        its own numbers -- yt-dlp's rate is instantaneous where this one is an
+        average over the poll window, and two sources would fight.
         """
+        promoted = False
+        prev_size = 0
+        prev_at = time.monotonic()
         while True:
             await asyncio.sleep(PART_PROBE_S)
+            if job.id in self._hook_seen:
+                return  # the engine speaks for itself
             part = await asyncio.to_thread(self._captured_part, job, baseline)
             if part is None:
                 continue
             self._job_parts[job.id] = part
-            if await self._patch(job.id, status="downloading"):
+            try:
+                size = await asyncio.to_thread(_size_of, part)
+            except OSError:
+                continue
+            # Latch only on a promotion that won the UPDATE, same as
+            # _consume_progress: a no-op means the row was not 'probing' yet.
+            if not promoted and await self._patch(job.id, status="downloading"):
+                promoted = True
                 events.publish({"type": "job.downloading", "job_id": job.id})
-            return
+            now = time.monotonic()
+            window = now - prev_at
+            speed = (size - prev_size) / window if window > 0 and size > prev_size else None
+            prev_size, prev_at = size, now
+            events.publish(
+                {
+                    "type": "job.progress",
+                    "job_id": job.id,
+                    "status": "downloading",
+                    "downloaded_bytes": size,
+                    "speed": speed,
+                }
+            )
 
     async def _consume_progress(self, job_id: int, q: pyqueue.Queue) -> None:
         """Drain hook payloads (marshaled via call_soon_threadsafe) until the
@@ -535,6 +588,8 @@ class DownloadManager:
             payload = await asyncio.to_thread(q.get)
             if payload is None:
                 break
+            # Tell _report_from_disk to stand down: this engine reports.
+            self._hook_seen.add(job_id)
             fields: dict = {"progress": _pct(payload)}
             # First byte-level hook means probing is over. run_job sets
             # 'probing' up front and only writes a terminal status at the end,

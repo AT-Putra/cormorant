@@ -277,10 +277,15 @@ async def test_engine_with_no_progress_hooks_still_leaves_probing(
 
 
 async def test_terminate_engine_children_stops_only_the_named_capture(tmp_path):
-    """Several captures can be in flight at once, in the same directory.
+    """Match ffmpeg's real argument form, and only the named capture.
 
-    The temp filename is the only thing that tells them apart, so cancelling
-    one job must not reach into another job's engine -- or the live recorder's.
+    yt-dlp does not hand ffmpeg a bare path: _ffmpeg_filename_argument turns
+    /media/x/live.mp4.part into file:/media/x/live.mp4.part, because a path
+    containing ':' would otherwise read as a protocol. Comparing raw argv
+    against the path matched nothing, so cancel was inert against the exact
+    engine it exists to stop. Several captures also share a directory, so the
+    match still has to be exact -- cancelling one job must never reach into
+    another job's engine, or the live recorder's.
     """
     import subprocess
     import sys
@@ -289,17 +294,31 @@ async def test_terminate_engine_children_stops_only_the_named_capture(tmp_path):
 
     mine = tmp_path / "mine.mp4.part"
     theirs = tmp_path / "theirs.mp4.part"
-    procs = [
-        subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", str(f)])
-        for f in (mine, theirs)
-    ]
+    sleeper = "import time; time.sleep(30)"
+    # As ffmpeg is really invoked, plus a bare-path engine for good measure.
+    ffmpeg_style = subprocess.Popen([sys.executable, "-c", sleeper, f"file:{mine}"])
+    bare_style = subprocess.Popen([sys.executable, "-c", sleeper, str(mine)])
+    other_job = subprocess.Popen([sys.executable, "-c", sleeper, f"file:{theirs}"])
+    procs = [ffmpeg_style, bare_style, other_job]
     try:
-        assert dl.terminate_engine_children(mine) == 1
-        procs[0].wait(timeout=10)
-        assert procs[1].poll() is None  # the other capture is untouched
+        assert dl.terminate_engine_children(mine) == 2
+        ffmpeg_style.wait(timeout=10)
+        bare_style.wait(timeout=10)
+        assert other_job.poll() is None  # the other capture is untouched
     finally:
         for proc in procs:
             proc.kill()
+
+
+def test_arg_path_unwraps_only_ffmpegs_url_form(tmp_path):
+    """A prefix strip must not corrupt paths that never had one."""
+    from app.services.downloader import _arg_path
+
+    assert _arg_path("file:/media/x/live.mp4.part") == "/media/x/live.mp4.part"
+    assert _arg_path("/media/x/live.mp4.part") == "/media/x/live.mp4.part"
+    assert _arg_path("-i") == "-i"
+    # A path that merely contains the word is left alone.
+    assert _arg_path("/media/profile:1/x.part") == "/media/profile:1/x.part"
 
 
 async def test_cancel_stops_an_engine_that_reports_no_progress(
@@ -436,6 +455,93 @@ async def test_the_claim_survives_a_requeue_but_not_a_finished_run(
     await mgr.run_job(jid)
     assert (await fetch(db, jid)).status == "done"
     assert jid not in mgr._job_parts
+
+
+async def test_progress_comes_from_disk_when_the_engine_reports_none(
+    mgr, db, fake_engine, monkeypatch
+):
+    """Size and rate for an engine that publishes neither.
+
+    Everything the Queue shows about a running job comes from progress hooks,
+    and FFmpegFD -- which is what yt-dlp hands a LIVE m3u8 -- fires exactly
+    one, after the capture ends. A tiktok live therefore sat at 0 MB with no
+    rate for its whole run while ffmpeg wrote gigabytes to disk.
+    """
+    from app.services import downloader as dl, ytdlp as y
+    import app.services.events as events
+
+    monkeypatch.setattr(dl, "PART_PROBE_S", 0.01)
+    job, add = make_job(db)
+    jid = await add()
+
+    def silent_live(opts, url):
+        out = y.output_dir(job)
+        out.mkdir(parents=True, exist_ok=True)
+        part = out / "T.mp4.part"
+        for n in range(1, 6):  # a capture growing on disk, silent to the app
+            part.write_bytes(b"0" * (n * 50_000))
+            time.sleep(0.05)
+        return FakeInfo(requested_downloads=[{"filepath": str(out / "T.mp4")}])
+
+    fake_engine.download = silent_live
+
+    seen = []
+    events.subscribe(seen.append)
+    try:
+        await mgr.run_job(jid)
+    finally:
+        events.unsubscribe(seen.append)
+
+    prog = [e for e in seen if e.get("type") == "job.progress"]
+    assert prog, "nothing reported for a hook-silent engine"
+    assert max(e["downloaded_bytes"] for e in prog) >= 50_000
+    assert any(e.get("speed") for e in prog), "size but no rate"
+
+
+async def test_a_reporting_engine_keeps_its_own_numbers(
+    mgr, db, fake_engine, monkeypatch
+):
+    """Two sources of truth would fight, so the disk reader stands down.
+
+    yt-dlp's rate is instantaneous where the disk one is an average over the
+    poll window; interleaving them would make the panel jitter between two
+    different measurements of the same download.
+    """
+    from app.services import downloader as dl, ytdlp as y
+    import app.services.events as events
+
+    monkeypatch.setattr(dl, "PART_PROBE_S", 0.01)
+    job, add = make_job(db)
+    jid = await add()
+
+    def hooked(opts, url):
+        out = y.output_dir(job)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "T.mp4.part").write_bytes(b"0" * 5000)
+        for hook in opts.get("progress_hooks", []):
+            hook({"status": "downloading", "downloaded_bytes": 5000,
+                  "total_bytes": 10000})
+        time.sleep(0.25)  # ~25 poll windows for a reader that did not stop
+        return FakeInfo(requested_downloads=[{"filepath": str(out / "T.mp4")}])
+
+    fake_engine.download = hooked
+
+    seen = []
+    events.subscribe(seen.append)
+    try:
+        await mgr.run_job(jid)
+    finally:
+        events.unsubscribe(seen.append)
+
+    # Hook payloads carry total_bytes; the disk reader has no total to give.
+    from_disk = [
+        e for e in seen
+        if e.get("type") == "job.progress" and "total_bytes" not in e
+    ]
+    # At most one: the reader can sample once before the consumer thread has
+    # drained the first hook and recorded that this engine reports for itself.
+    assert len(from_disk) <= 1, f"disk reader kept talking over the engine: {len(from_disk)}"
+    assert jid not in mgr._hook_seen  # released when the run settles
 
 
 async def test_space_floor_gate_pauses_auto_only(mgr, db, fake_engine, monkeypatch):
