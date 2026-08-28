@@ -372,6 +372,24 @@ class RecorderSupervisor:
                 pass
         return True
 
+    async def start(self) -> None:
+        """Arm the supervisor for a fresh process life.
+
+        shutdown() latches _shutting_down so a task sitting between engines
+        does not spawn another on the way out, and nothing cleared it again.
+        Harmless in production, where the process exits moments later -- but
+        the supervisor is a module-level singleton, and conftest enters and
+        leaves the app lifespan with `with TestClient(...)`, so the latch
+        survived into every later test in the session. Nothing hits it today
+        only because the recorder tests build their own supervisor; a test
+        that recorded through the singleton would get no engine, no error and
+        no capture, with the outcome depending on the random test order.
+
+        Pairs with shutdown(), the way manager, poller and recovery already
+        pair start with stop.
+        """
+        self._shutting_down = False
+
     async def shutdown(self) -> None:
         """Kill every registered engine child (main.py lifespan teardown)."""
         self._shutting_down = True

@@ -329,6 +329,9 @@ async def test_reconcile_runs_before_the_recovery_sweep_starts(db, monkeypatch):
     order: list[str] = []
 
     class _Recorder:
+        async def start(self) -> None:
+            order.append("arm")
+
         async def reconcile_on_boot(self) -> None:
             order.append("reconcile")
 
@@ -357,7 +360,40 @@ async def test_reconcile_runs_before_the_recovery_sweep_starts(db, monkeypatch):
     async with main_mod.lifespan(main_mod.create_app()):
         pass
 
-    assert order == ["reconcile", "recovery"]
+    # Armed before reconcile, because reconcile can start fresh captures;
+    # reconcile before the sweep, so its rows are settled when claims are read.
+    assert order == ["arm", "reconcile", "recovery"]
+
+
+async def test_shutdown_latches_until_start_arms_it_again(sup, db, monkeypatch):
+    """The latch has to be releasable, because the object outlives one run.
+
+    shutdown() sets a flag so a task between engines does not spawn another on
+    the way out, and nothing cleared it. Fine for a process that is exiting --
+    but the supervisor is a module singleton and conftest enters and leaves the
+    app lifespan with `with TestClient(...)`, so the latch survived into every
+    later test in the session, where a capture would spawn no engine and report
+    no error. Nothing hits it today only because these tests build their own
+    supervisor.
+    """
+    pin_out(monkeypatch, "relatch.mp4")
+    monkeypatch.setattr(rec_mod, "_kill_tree", lambda pid: None)
+
+    await sup.shutdown()
+
+    latched = script_spawns(monkeypatch, [FakeProc(exit_code=0)])
+    rid = await make_recording(db)()
+    await asyncio.wait_for(sup.start_recording(rid), timeout=5)
+    assert latched == [], "spawned an engine while shut down"
+    # Left in 'recording' for reconcile_on_boot rather than finalized.
+    assert (await fetch(db, rid)).status == "recording"
+
+    await sup.start()
+
+    armed = script_spawns(monkeypatch, [FakeProc(exit_code=0)])
+    rid2 = await make_recording(db)()
+    await asyncio.wait_for(sup.start_recording(rid2), timeout=5)
+    assert len(armed) == 1, "still latched after start()"
 
 
 async def test_shutdown_does_not_start_the_fallback_engine(sup, db, monkeypatch):

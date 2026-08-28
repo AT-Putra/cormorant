@@ -89,6 +89,17 @@ async def _size_stable(path: Path) -> bool:
     return await asyncio.to_thread(_sizes)
 
 
+async def _already_registered(final: Path) -> bool:
+    """True when a LibraryItem already points at this recovered file."""
+    async with _db() as session:
+        row = await session.execute(
+            select(models.LibraryItem).where(
+                models.LibraryItem.file_path == str(final)
+            )
+        )
+        return row.scalar_one_or_none() is not None
+
+
 async def remux_and_register(part: Path) -> models.LibraryItem | None:
     """ffmpeg -c copy the orphan into *_recovered.mp4; register LibraryItem.
 
@@ -98,13 +109,21 @@ async def remux_and_register(part: Path) -> models.LibraryItem | None:
     if not part.exists():
         return None
     if final.exists():
-        # A rescue that finished deletes its source, so a recovered file
-        # sitting NEXT TO the .part it came from is the debris of one that was
-        # cut off partway -- a container stop during the remux is the way to
-        # get one. The guard here used to read that as "already recovered" and
-        # return, which stranded the orphan permanently: nothing else deletes
-        # either file, so every later sweep took the same early exit and the
-        # real capture stayed a .part forever.
+        # Both names present. Usually that means a rescue was cut off partway
+        # -- a container stop during the remux -- because one that finishes
+        # deletes its source. The guard here used to read it as "already
+        # recovered" and return, which stranded the orphan permanently.
+        #
+        # But "finished" is really recorded by the LibraryItem, not by the
+        # file. If the row is already there, the rescue did complete and only
+        # the cleanup failed, so redoing the remux would burn a full
+        # re-encode every sweep forever and still register nothing new.
+        if await _already_registered(final):
+            log.warning(
+                "%s is already in the library; leaving %s for cleanup",
+                final.name, part.name,
+            )
+            return None
         log.warning(
             "discarding partial recovery %s and retrying %s",
             final.name, part.name,
@@ -142,8 +161,17 @@ async def remux_and_register(part: Path) -> models.LibraryItem | None:
         )
         return None
 
-    # Drop the source only once a playable copy exists.
-    part.unlink(missing_ok=True)
+    # Drop the source only once a playable copy exists. A failure here must
+    # not cost the registration that follows: the recovered file is real
+    # either way, and its row is what tells the next sweep this orphan is
+    # done. Raising instead left a good capture unregistered AND looking
+    # like debris, which is the shape that caused a re-remux every sweep.
+    try:
+        part.unlink(missing_ok=True)
+    except OSError:
+        log.warning(
+            "recovered %s but could not remove %s", final.name, part.name
+        )
 
     # platform/creator from the path shape MEDIA_ROOT/<platform>/<creator>/...
     rel = part.parent.relative_to(_media_root())

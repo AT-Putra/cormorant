@@ -150,6 +150,49 @@ def test_a_partial_recovery_is_retried_not_treated_as_done(media_root, monkeypat
     assert not part.exists()  # source consumed by the completed rescue
 
 
+def test_a_failed_cleanup_still_registers_and_is_not_redone(media_root, monkeypatch):
+    """Deleting the source is the last step, and it used to be able to undo
+    the whole rescue.
+
+    unlink(missing_ok=True) forgives only a file that is already gone; a
+    read-only disk or a permissions problem still raises, and it raised
+    BEFORE the LibraryItem was written. That left a good recovered file
+    unregistered and sitting next to its .part -- exactly the shape that now
+    reads as an interrupted attempt, so every later sweep threw the good file
+    away and re-ran the whole remux. Forever, on a file that can be a
+    gigabyte.
+    """
+    root: Path = media_root
+    d = root / "tiktok" / "someone"
+    d.mkdir(parents=True)
+    part = d / "live_z.flv.part"
+    part.write_bytes(bytes(4096))
+    final = rec.recovered_name(part)
+
+    monkeypatch.setattr(rec.subprocess, "run", _ok_ffmpeg)
+
+    def _cannot_delete(self, missing_ok=False):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(Path, "unlink", _cannot_delete)
+
+    item = asyncio.run(rec.remux_and_register(part))
+
+    assert item is not None, "a failed cleanup cost the registration"
+    assert final.is_file()
+    assert part.exists()  # could not be removed, and that is survivable
+
+    # A later sweep sees both files, but the library row says it is done.
+    monkeypatch.undo()
+    monkeypatch.setattr(rec.subprocess, "run", _boom_ffmpeg)
+    assert asyncio.run(rec.remux_and_register(part)) is None
+    assert final.is_file(), "threw away a capture already in the library"
+
+
+def _boom_ffmpeg(cmd, **kw):
+    raise AssertionError("re-remuxed a capture already in the library")
+
+
 def test_an_already_recovered_orphan_is_not_redone(media_root, monkeypatch):
     """The other half of the rule: a rescue that finished stays finished."""
     root: Path = media_root
