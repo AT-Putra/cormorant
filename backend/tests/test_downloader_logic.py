@@ -6,6 +6,7 @@ hysteresis resume, redownload override.
 
 import asyncio
 import threading
+import time
 from datetime import timedelta
 
 import pytest
@@ -361,6 +362,80 @@ async def test_cancel_stops_an_engine_that_reports_no_progress(
     assert job_row.error == "cancelled"
     assert [e for e in seen if e.get("type") == "job.cancelled"]
     assert mgr._job_parts == {}
+
+
+async def test_a_resumed_run_still_owns_the_part_it_wrote(mgr, db):
+    """part_snapshot is taken at the start of EVERY run.
+
+    So on a resumed or reconnected attempt the job's own .part from the last
+    attempt is already on disk, and a raw baseline disowned it -- which cut
+    the live reconnect chain to one retry and left a capture that ended after
+    a drop sitting on disk unfiled.
+    """
+    from app.services import downloader as dl, ytdlp as y
+
+    job, add = make_job(db)
+    await add()
+    out = y.output_dir(job)
+    out.mkdir(parents=True, exist_ok=True)
+    mine = out / "T.mp4.part"
+    mine.write_bytes(b"0" * 64)  # left by the previous attempt
+    recorder_capture = out / "live_20260828_100718.flv.part"
+    recorder_capture.write_bytes(b"0" * 999)
+
+    # The resumed run sees BOTH files as pre-existing.
+    baseline = dl.part_snapshot(job)
+    assert {str(mine), str(recorder_capture)} <= baseline
+
+    # Without a claim it owns neither -- this is the state that regressed.
+    assert mgr._captured_part(job, baseline) is None
+
+    # With the claim carried over from the previous attempt, it owns its own
+    # file again, and still not the recorder's larger one.
+    mgr._job_parts[job.id] = mine
+    assert mgr._captured_part(job, baseline) == mine
+
+    # Cancelling a resumed job discards its own bytes and nobody else's.
+    mgr._cleanup_parts(job, baseline)
+    assert not mine.exists()
+    assert recorder_capture.is_file()
+
+
+async def test_the_claim_survives_a_requeue_but_not_a_finished_run(
+    mgr, db, fake_engine, monkeypatch
+):
+    """A re-queued retry resumes onto the same .part, so the claim has to
+    outlive that run; a settled job must start the next one fresh."""
+    from app.services import downloader as dl, ytdlp as y
+
+    monkeypatch.setattr(dl, "PART_PROBE_S", 0.01)
+    job, add = make_job(db)
+    jid = await add()
+    out = y.output_dir(job)
+
+    def drops_midway(opts, url):
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "T.mp4.part").write_bytes(b"0" * 32)
+        time.sleep(0.15)
+        raise RuntimeError("Connection reset by peer")
+
+    fake_engine.download = drops_midway
+    await mgr.run_job(jid)
+
+    # Re-queued for another attempt, and still owns what it wrote.
+    assert (await fetch(db, jid)).status == "queued"
+    assert mgr._job_parts.get(jid) == out / "T.mp4.part"
+
+    # Now let it finish; the claim is released.
+    def finishes(opts, url):
+        for hook in opts.get("progress_hooks", []):
+            hook({"status": "downloading", "downloaded_bytes": 9, "total_bytes": 10})
+        return FakeInfo(requested_downloads=[{"filepath": str(out / "T.mp4")}])
+
+    fake_engine.download = finishes
+    await mgr.run_job(jid)
+    assert (await fetch(db, jid)).status == "done"
+    assert jid not in mgr._job_parts
 
 
 async def test_space_floor_gate_pauses_auto_only(mgr, db, fake_engine, monkeypatch):

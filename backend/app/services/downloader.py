@@ -392,7 +392,11 @@ class DownloadManager:
                     consumer.cancel()
                 self._abort_events.pop(job.id, None)
                 self._cancelled.discard(job.id)
-                self._job_parts.pop(job.id, None)
+                # Keep the claim while a re-queued retry or a paused job may
+                # still resume onto the same .part; drop it once the run has
+                # settled, so the next one starts fresh.
+                if job.status in TERMINAL:
+                    self._job_parts.pop(job.id, None)
                 # Keep the counter only while a reconnect chain is in flight;
                 # any settled job starts fresh next time.
                 if job.status != "queued":
@@ -422,6 +426,33 @@ class DownloadManager:
         )
         return any(normalize_url(prior.url) == target for prior in rows)
 
+    def _own_claim(self, job: models.DownloadJob) -> str | None:
+        """The .part this job already claimed on an earlier attempt, if any.
+
+        getattr, because _captured_part only ever needed a job to name its
+        output directory; a caller holding something job-shaped keeps working
+        and simply has no claim.
+        """
+        mine = self._job_parts.get(getattr(job, "id", None))
+        return str(mine) if mine is not None else None
+
+    def _not_mine(
+        self, job: models.DownloadJob, baseline: set[str] | None
+    ) -> set[str]:
+        """`baseline` minus the file this job claimed for itself.
+
+        part_snapshot is taken at the start of EVERY run, so on a resumed or
+        reconnected attempt the job's own .part from the previous attempt is
+        already on disk -- and the raw baseline disowned it. That cut the live
+        reconnect chain to a single retry, left a capture that ended after a
+        drop unfiled, and put a resumed HLS job back in 'probing'.
+        """
+        skip = set(baseline or ())
+        mine = self._own_claim(job)
+        if mine is not None:
+            skip.discard(mine)
+        return skip
+
     def _captured_part(
         self, job: models.DownloadJob, baseline: set[str] | None = None
     ) -> Path | None:
@@ -430,7 +461,7 @@ class DownloadManager:
         `baseline` is part_snapshot()'s reading from before the engine ran;
         without it a shared output dir hands back the recorder's live capture.
         """
-        skip = baseline or set()
+        skip = self._not_mine(job, baseline)
         try:
             parts = [
                 p
@@ -458,9 +489,10 @@ class DownloadManager:
 
         Scoped by `baseline` for the reason part_snapshot spells out: the glob
         also matches the live recorder's in-flight capture, and cancelling a
-        download must not delete somebody else's recording.
+        download must not delete somebody else's recording. The job's own
+        claim still goes -- cancelling a resumed job discards its bytes.
         """
-        skip = baseline or set()
+        skip = self._not_mine(job, baseline)
         try:
             for p in ytdlp.output_dir(job).glob("*.part*"):
                 if str(p) not in skip:
