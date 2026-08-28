@@ -240,6 +240,11 @@ async def _apply_transition(
     return job
 
 
+# Statuses with a worker actually inside run_job. Anything else -- queued,
+# paused, the space-floor pause -- has no run to clear its manager state.
+_IN_FLIGHT = ("probing", "downloading")
+
+
 @router.delete("/{job_id}", status_code=204)
 async def delete_download(
     job_id: int, session: AsyncSession = Depends(get_session)
@@ -251,8 +256,14 @@ async def delete_download(
         # cancel() aborts the engine thread and sweeps .part files; run_job's
         # own status write then no-ops because the row is gone.
         get_manager().cancel(job.id)
+    mid_run = job.status in _IN_FLIGHT
     await session.delete(job)
     await session.commit()
+    if not mid_run:
+        # Nothing is running to clear the cancel mark this leaves behind, and
+        # SQLite hands the id straight to the next job created. See
+        # DownloadManager.forget.
+        get_manager().forget(job_id)
     return Response(status_code=204)
 
 

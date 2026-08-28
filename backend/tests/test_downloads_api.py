@@ -318,6 +318,67 @@ def test_unknown_action_and_missing_job(client):
     assert c.post("/api/downloads/999/pause").status_code == 404
 
 
+def test_deleting_an_idle_job_clears_its_cancel_mark(client, monkeypatch):
+    """DownloadJob.id is a plain SQLite rowid, and SQLite REUSES the highest
+    one after a delete.
+
+    cancel() marks an id cancelled, and only run_job's finally clears it --
+    which never runs for a job deleted while paused, nor for a deleted queued
+    one, whose run_job returns early on the missing row before the try block.
+    The mark outlived the job, so the next job created could inherit the id
+    and be treated as cancelled the moment it raised: reported "cancelled",
+    with its .part deleted.
+    """
+    c, stub, dl = client
+    monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None, **kw: {"title": "X"})
+
+    seen_ids = []
+    for status in ("paused", "queued", "paused_space_floor"):
+        r = c.post("/api/downloads", json={"url": f"https://www.instagram.com/reel/C{status}/"})
+        jid = r.json()["id"]
+        seen_ids.append(jid)
+        asyncio.run(_set_job_status(jid, status))
+        stub.forgotten.clear()
+        assert c.delete(f"/api/downloads/{jid}").status_code == 204
+        assert stub.forgotten == [jid], f"{status} job left its mark behind"
+
+    # Not a hypothetical: every job above was handed the same reused id.
+    assert len(set(seen_ids)) == 1, seen_ids
+
+    # A job mid-run keeps its mark: run_job's cancelled branch still needs it
+    # to sweep the .part and report a stop rather than an engine failure.
+    r = c.post("/api/downloads", json={"url": "https://www.instagram.com/reel/Clive1/"})
+    live = r.json()["id"]
+    asyncio.run(_set_job_status(live, "downloading"))
+    stub.forgotten.clear()
+    stub.cancelled.clear()
+    assert c.delete(f"/api/downloads/{live}").status_code == 204
+    assert stub.cancelled == [live]
+    assert stub.forgotten == []
+
+
+async def test_forget_drops_every_trace_of_a_job(tmp_path):
+    """forget() has to clear all of it, or the next id inherits the rest."""
+    from pathlib import Path
+
+    from app.services.downloader import DownloadManager
+
+    m = DownloadManager()
+    m.cancel(7)
+    m._job_parts[7] = Path("/media/x/y.part")
+    m._live_retries[7] = 3
+    m._hook_seen.add(7)
+    assert 7 in m._cancelled
+
+    m.forget(7)
+
+    assert 7 not in m._cancelled
+    assert 7 not in m._abort_events
+    assert 7 not in m._job_parts
+    assert 7 not in m._live_retries
+    assert 7 not in m._hook_seen
+
+
 def test_delete_job_removes_row_and_cancels_active(client, monkeypatch):
     c, stub, dl = client
     monkeypatch.setattr(dl.ytdlp, "probe", lambda url, cookiefile=None, **kw: {"title": "X"})

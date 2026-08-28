@@ -39,6 +39,7 @@ class StubManager:
         self.enqueued = []
         self.paused = []
         self.cancelled = []
+        self.forgotten = []
 
     def enqueue(self, job_id):
         self.enqueued.append(job_id)
@@ -48,6 +49,9 @@ class StubManager:
 
     def cancel(self, job_id):
         self.cancelled.append(job_id)
+
+    def forget(self, job_id):
+        self.forgotten.append(job_id)
 
     async def start(self):
         pass

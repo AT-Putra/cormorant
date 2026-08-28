@@ -229,6 +229,27 @@ class DownloadManager:
         if part is not None:
             terminate_engine_children(part)
 
+    def forget(self, job_id: int) -> None:
+        """Drop every trace of a job the queue no longer has.
+
+        cancel() marks an id cancelled and only run_job's finally clears it --
+        which never runs for a job deleted while paused, nor for a deleted
+        queued one, whose run_job returns early on the missing row before the
+        try block is even entered. DownloadJob.id is a plain SQLite rowid, and
+        SQLite REUSES the highest id after a delete, so the next job created
+        could inherit a cancelled id and be treated as cancelled the moment it
+        raised: reported "cancelled" and its .part deleted.
+
+        Not called for a job that is mid-run. There the engine is live, and
+        run_job's cancelled branch still needs the mark to sweep the .part and
+        report the stop as a cancel rather than an ffmpeg failure.
+        """
+        self._cancelled.discard(job_id)
+        self._abort_events.pop(job_id, None)
+        self._job_parts.pop(job_id, None)
+        self._live_retries.pop(job_id, None)
+        self._hook_seen.discard(job_id)
+
     def resume(self, job_id: int) -> None:
         """Re-enqueue a paused job — continuedl picks up .part files."""
         self.enqueue(job_id)
