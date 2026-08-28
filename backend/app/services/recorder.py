@@ -153,14 +153,29 @@ def captured_file(capture: Path) -> Path | None:
     that was never created. The bytes survived only because the orphan sweep
     collected them ten minutes later under a "(recovered)" title, which is a
     safety net doing a job that belongs here.
+
+    Whichever holds more, when both names exist -- because the engine chain
+    can leave one of each. yt-dlp writes <name>.part, and streamlink, the
+    fallback it falls through to, writes <name> directly, so a yt-dlp capture
+    killed mid-flight and a fallback that managed a few seconds sit side by
+    side. Preferring the finished name on principle handed the recording the
+    smaller of the two: measured on a restart at 1.4 MB of streamlink against
+    334 MB of yt-dlp. Size decides it correctly in both directions -- a
+    complete fallback capture outweighs an abandoned .part, and a long .part
+    outweighs a fallback that barely started.
     """
+    best: Path | None = None
+    best_size = 0
     for candidate in (capture, part_path(capture)):
         try:
-            if candidate.is_file() and candidate.stat().st_size > 0:
-                return candidate
+            if not candidate.is_file():
+                continue
+            size = candidate.stat().st_size
         except OSError:
             continue
-    return None
+        if size > best_size:
+            best, best_size = candidate, size
+    return best
 
 
 def drop_part_suffix(path: Path) -> Path:

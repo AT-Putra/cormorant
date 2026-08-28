@@ -315,6 +315,68 @@ async def test_failed_remux_keeps_and_registers_the_capture(sup, db, monkeypatch
     assert out.with_suffix(".flv").is_file()
 
 
+def test_captured_file_picks_the_bigger_of_the_two_names(tmp_path):
+    """The engine chain can leave one file under each name.
+
+    yt-dlp writes <name>.part; streamlink, the fallback it falls through to,
+    writes <name> directly. Preferring the finished name on principle handed
+    the recording the smaller of the two -- measured on a restart at 1.4 MB of
+    streamlink beside 334 MB of yt-dlp.
+    """
+    capture = tmp_path / "live.flv"
+    part = tmp_path / "live.flv.part"
+
+    # Only the temp name: the stopped-engine case.
+    part.write_bytes(b"0" * 100)
+    assert rec_mod.captured_file(capture) == part
+
+    # A fallback that barely started must not outrank the real capture.
+    capture.write_bytes(b"0" * 5)
+    assert rec_mod.captured_file(capture) == part
+
+    # ...and a fallback that ran to completion does outrank it.
+    capture.write_bytes(b"0" * 500)
+    assert rec_mod.captured_file(capture) == capture
+
+    # Nothing written at all stays None; a zero-byte file is not a capture.
+    empty = tmp_path / "none.flv"
+    empty.write_bytes(b"")
+    assert rec_mod.captured_file(empty) is None
+
+
+async def test_a_tiny_fallback_does_not_displace_the_real_capture(
+    sup, db, monkeypatch
+):
+    """End to end: the chain falls through, and the big .part still wins."""
+    out = pin_out(monkeypatch, "fallback.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    capture = out.with_suffix(".flv")
+    part = out.with_suffix(".flv.part")
+
+    # yt-dlp dies holding a large .part; streamlink then writes a few bytes.
+    procs = [FakeProc(exit_code=1), FakeProc(exit_code=1)]
+    script_spawns(monkeypatch, procs)
+    real_spawn = rec_mod.asyncio.create_subprocess_exec
+    seen = {"n": 0}
+
+    async def spawn_touch(*cmd, **kwargs):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            part.write_bytes(b"0" * 4096)
+        else:
+            capture.write_bytes(b"0" * 8)
+        return await real_spawn(*cmd, **kwargs)
+
+    monkeypatch.setattr(rec_mod.asyncio, "create_subprocess_exec", spawn_touch)
+
+    rid = await make_recording(db)()
+    await asyncio.wait_for(sup.start_recording(rid), timeout=5)
+
+    # fake_remux copies the source, so the finalized size names the winner.
+    assert out.is_file()
+    assert out.stat().st_size == 4096
+
+
 async def test_capture_under_a_part_name_is_still_finalized(sup, db, monkeypatch):
     """An engine that never renamed its temp file still recorded something.
 
