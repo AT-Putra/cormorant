@@ -315,6 +315,82 @@ async def test_failed_remux_keeps_and_registers_the_capture(sup, db, monkeypatch
     assert out.with_suffix(".flv").is_file()
 
 
+async def test_reconcile_runs_before_the_recovery_sweep_starts(db, monkeypatch):
+    """Startup order is load-bearing, not cosmetic.
+
+    recovery decides a .part is an orphan by checking it against the
+    output_path of every ACTIVE recording -- and a row left in 'recording' by
+    a killed process still counts as active until reconcile_on_boot rewrites
+    it. Starting the sweep first meant the boot pass skipped the very orphans
+    it exists to collect, and they waited a full 10-minute cycle instead.
+    """
+    import app.main as main_mod
+
+    order: list[str] = []
+
+    class _Recorder:
+        async def reconcile_on_boot(self) -> None:
+            order.append("reconcile")
+
+        async def shutdown(self) -> None:
+            pass
+
+    class _Recovery:
+        async def start(self) -> None:
+            order.append("recovery")
+
+        async def stop(self) -> None:
+            pass
+
+    class _Noop:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(main_mod, "recorder", _Recorder())
+    monkeypatch.setattr(main_mod, "recovery", _Recovery())
+    monkeypatch.setattr(main_mod, "poller", _Noop())
+    monkeypatch.setattr(main_mod, "manager", _Noop())
+
+    async with main_mod.lifespan(main_mod.create_app()):
+        pass
+
+    assert order == ["reconcile", "recovery"]
+
+
+async def test_shutdown_does_not_start_the_fallback_engine(sup, db, monkeypatch):
+    """Teardown must not spawn the engine it is about to kill.
+
+    shutdown() kills the running engine, but the supervision task simply moved
+    on to the next entry in the chain -- and streamlink writes the FINISHED
+    name directly, so it laid a few hundred KB beside the large .part yt-dlp
+    had left. One stray fragment per restart-during-capture, and a two-file
+    pair that only captured_file's size rule keeps harmless.
+    """
+    out = pin_out(monkeypatch, "teardown.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    first = FakeProc(exit_code=-9, delay=999)
+    second = FakeProc(exit_code=0)
+    spawned = script_spawns(monkeypatch, [first, second])
+
+    rid = await make_recording(db)()
+    task = sup.start_recording(rid)
+    await asyncio.sleep(0.05)  # let supervise register the engine
+
+    def fake_kill(pid):
+        first._delay = 0.0  # the tree dies
+
+    monkeypatch.setattr(rec_mod, "_kill_tree", fake_kill)
+    await asyncio.wait_for(sup.shutdown(), timeout=10)
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+
+    assert len(spawned) == 1, "teardown spawned the fallback engine"
+    # The row is left for reconcile_on_boot rather than finalized here.
+    assert (await fetch(db, rid)).status == "recording"
+
+
 def test_captured_file_picks_the_bigger_of_the_two_names(tmp_path):
     """The engine chain can leave one file under each name.
 

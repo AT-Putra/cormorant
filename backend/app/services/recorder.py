@@ -324,6 +324,9 @@ class RecorderSupervisor:
         # recording_id -> status to apply on exit instead of the computed one
         # (user-initiated stop => 'ended', not 'failed')
         self._intended: dict[int, str] = {}
+        # Set once teardown begins, so a supervision task that is between
+        # engines does not start another one on the way out.
+        self._shutting_down = False
         self.grace_s = TERMINATE_GRACE_S
 
     # ---- lifecycle -------------------------------------------------------
@@ -371,6 +374,7 @@ class RecorderSupervisor:
 
     async def shutdown(self) -> None:
         """Kill every registered engine child (main.py lifespan teardown)."""
+        self._shutting_down = True
         for rid, (proc, _task) in list(self._registry.items()):
             if proc is not None and getattr(proc, "returncode", 0) is None:
                 try:
@@ -442,6 +446,18 @@ class RecorderSupervisor:
                 quality,
             )
             for cmd in chain:
+                if self._shutting_down:
+                    # The app is going down. The engine just killed leaves its
+                    # .part; spawning the fallback only writes a few hundred KB
+                    # under the FINISHED name before it is killed too, which is
+                    # where every stray fragment sitting beside a large .part
+                    # came from -- 655 KB of streamlink next to 646 MB of
+                    # yt-dlp, measured on a deploy.
+                    #
+                    # Return rather than finalize: the row belongs to
+                    # reconcile_on_boot, and a remux started here would be cut
+                    # off mid-write by the container stop anyway.
+                    return
                 if self._intended.get(recording_id):
                     # User stop landed while we were between engines — do not
                     # spawn the fallback; finalize as 'ended' below.

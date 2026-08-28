@@ -46,8 +46,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     sweep_stale_cookiefiles()
     await manager.start()
     await poller.start()
-    await recovery.start()
+    # Reconcile BEFORE the sweeps start. recovery decides a .part is an orphan
+    # by checking it against the output_path of every ACTIVE recording, and a
+    # row left in 'recording' by a killed process still counts as active until
+    # this runs -- so a boot sweep that got there first skipped the very
+    # orphans it exists to collect, and they waited a full 10-minute cycle.
     await recorder.reconcile_on_boot()
+    await recovery.start()
     yield
     await recorder.shutdown()
     await poller.stop()
