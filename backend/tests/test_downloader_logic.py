@@ -12,6 +12,7 @@ from datetime import timedelta
 import pytest
 
 from app import models
+from app.services import downloader as dl
 from app.services.downloader import DownloadManager
 
 
@@ -542,6 +543,77 @@ async def test_a_reporting_engine_keeps_its_own_numbers(
     # drained the first hook and recorded that this engine reports for itself.
     assert len(from_disk) <= 1, f"disk reader kept talking over the engine: {len(from_disk)}"
     assert jid not in mgr._hook_seen  # released when the run settles
+
+
+async def test_part_helpers_follow_a_custom_folder_template(mgr, db):
+    """The engine writes under folder_template; the helpers must look there.
+
+    build_opts renders the setting, but part_snapshot, _captured_part and
+    _cleanup_parts all called output_dir(job) with no settings and so read the
+    default {platform}/{creator}. With a custom template every one of them
+    looked at an empty directory: no size reported, no output_path claimed --
+    which is what shields a paused job's capture from the sweep -- no
+    stream-over finalize, no reconnect, and cancel deleting nothing.
+    """
+    from app.services import ytdlp as y
+
+    settings = {"folder_template": "archive/{creator}"}
+    job, add = make_job(db)
+    await add()
+
+    real_dir = y.output_dir(job, settings)
+    default_dir = y.output_dir(job)
+    assert real_dir != default_dir  # the template actually moves it
+    real_dir.mkdir(parents=True, exist_ok=True)
+    part = real_dir / "T.mp4.part"
+    part.write_bytes(b"0" * 4096)
+
+    # Blind to the template, all three of these miss the file entirely.
+    assert dl.part_snapshot(job, settings) == {str(part)}
+    assert mgr._captured_part(job, set(), settings) == part
+
+    mgr._cleanup_parts(job, set(), settings)
+    assert not part.exists(), "cancel left the capture behind"
+
+
+async def test_the_first_rate_reading_has_nothing_to_subtract_from(
+    mgr, db, fake_engine, monkeypatch
+):
+    """Seeding prev_size at 0 made the first rate the whole file over one poll
+    window, so a capture already well underway reported a wildly overstated
+    speed for one tick.
+
+    A file that never grows is the clean way to see it: every reading has a
+    zero delta, so a correct implementation reports a size and no rate at all.
+    Before the fix the first reading alone claimed 5 MB per window.
+    """
+    from app.services import ytdlp as y
+    import app.services.events as events
+
+    monkeypatch.setattr(dl, "PART_PROBE_S", 0.01)
+    job, add = make_job(db)
+    jid = await add()
+
+    def already_large(opts, url):
+        out = y.output_dir(job)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "T.mp4.part").write_bytes(b"0" * 5_000_000)  # written once
+        time.sleep(0.12)  # several poll windows, no growth
+        return FakeInfo(requested_downloads=[{"filepath": str(out / "T.mp4")}])
+
+    fake_engine.download = already_large
+
+    seen = []
+    events.subscribe(seen.append)
+    try:
+        await mgr.run_job(jid)
+    finally:
+        events.unsubscribe(seen.append)
+
+    prog = [e for e in seen if e.get("type") == "job.progress"]
+    assert prog, "no progress reported"
+    assert all(e["downloaded_bytes"] == 5_000_000 for e in prog)
+    assert all(e["speed"] is None for e in prog), "invented a rate from no growth"
 
 
 async def test_space_floor_gate_pauses_auto_only(mgr, db, fake_engine, monkeypatch):

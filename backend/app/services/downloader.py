@@ -59,7 +59,7 @@ def _size_of(path: Path) -> int:
     return path.stat().st_size
 
 
-def part_snapshot(job) -> set[str]:
+def part_snapshot(job, settings: dict | None = None) -> set[str]:
     """.part files already in this job's output dir before its engine ran.
 
     The dir is per creator, and the live RECORDER writes there too: an
@@ -70,7 +70,11 @@ def part_snapshot(job) -> set[str]:
     Anything present before we start belongs to somebody else.
     """
     try:
-        return {str(p) for p in ytdlp.output_dir(job).glob("*.part") if p.is_file()}
+        return {
+            str(p)
+            for p in ytdlp.output_dir(job, settings).glob("*.part")
+            if p.is_file()
+        }
     except OSError:
         return set()
 
@@ -270,7 +274,6 @@ class DownloadManager:
             self._abort_events[job.id] = abort
             progress_q: pyqueue.Queue = pyqueue.Queue()
             loop = asyncio.get_running_loop()
-            baseline = await asyncio.to_thread(part_snapshot, job)
 
             settings = {
                 "folder_template": await self._setting_str(
@@ -283,11 +286,16 @@ class DownloadManager:
                 )(await self._setting_str(session, "audio", "")),
             }
 
+            # After settings: the engine writes under folder_template, and a
+            # baseline read from the default directory would describe somewhere
+            # else entirely -- the same setting build_opts renders below.
+            baseline = await asyncio.to_thread(part_snapshot, job, settings)
+
             consumer = asyncio.create_task(
                 self._consume_progress(job.id, progress_q)
             )
             first_bytes = asyncio.create_task(
-                self._report_from_disk(job, baseline)
+                self._report_from_disk(job, baseline, settings)
             )
             try:
                 extra: dict = {
@@ -335,7 +343,7 @@ class DownloadManager:
                 events.publish({"type": "job.done", "job_id": job.id})
             except ytdlp.AbortDownload:
                 if job.id in self._cancelled:
-                    self._cleanup_parts(job, baseline)
+                    self._cleanup_parts(job, baseline, settings)
                     await self._set_status(
                         session, job, status="failed", error="cancelled"
                     )
@@ -345,13 +353,13 @@ class DownloadManager:
                     await self._set_status(session, job, "paused")
                     events.publish({"type": "job.paused", "job_id": job.id})
             except Exception as exc:
-                captured = self._captured_part(job, baseline)
+                captured = self._captured_part(job, baseline, settings)
                 if job.id in self._cancelled:
                     # cancel() stopped the engine; whatever it raised on the
                     # way down is that cancel, not a fault of its own. Without
                     # this the Queue reported a killed capture as "ffmpeg
                     # exited with code 255".
-                    self._cleanup_parts(job, baseline)
+                    self._cleanup_parts(job, baseline, settings)
                     await self._set_status(
                         session, job, status="failed", error="cancelled"
                     )
@@ -479,7 +487,10 @@ class DownloadManager:
         return skip
 
     def _captured_part(
-        self, job: models.DownloadJob, baseline: set[str] | None = None
+        self,
+        job: models.DownloadJob,
+        baseline: set[str] | None = None,
+        settings: dict | None = None,
     ) -> Path | None:
         """Largest non-empty .part this job's own engine wrote, if any.
 
@@ -490,7 +501,7 @@ class DownloadManager:
         try:
             parts = [
                 p
-                for p in ytdlp.output_dir(job).glob("*.part")
+                for p in ytdlp.output_dir(job, settings).glob("*.part")
                 if p.is_file() and str(p) not in skip and p.stat().st_size > 0
             ]
         except OSError:
@@ -508,7 +519,10 @@ class DownloadManager:
             return part
 
     def _cleanup_parts(
-        self, job: models.DownloadJob, baseline: set[str] | None = None
+        self,
+        job: models.DownloadJob,
+        baseline: set[str] | None = None,
+        settings: dict | None = None,
     ) -> None:
         """Cancel removes this job's leftover .part/.ytdl temp fragments.
 
@@ -519,16 +533,19 @@ class DownloadManager:
         """
         skip = self._not_mine(job, baseline)
         try:
-            for p in ytdlp.output_dir(job).glob("*.part*"):
+            for p in ytdlp.output_dir(job, settings).glob("*.part*"):
                 if str(p) not in skip:
                     p.unlink(missing_ok=True)
-            for p in ytdlp.output_dir(job).glob("*.ytdl"):
+            for p in ytdlp.output_dir(job, settings).glob("*.ytdl"):
                 p.unlink(missing_ok=True)
         except OSError:
             log.warning("temp cleanup failed for job %s", job.id)
 
     async def _report_from_disk(
-        self, job: models.DownloadJob, baseline: set[str]
+        self,
+        job: models.DownloadJob,
+        baseline: set[str],
+        settings: dict | None = None,
     ) -> None:
         """Status, size and rate for an engine that reports none of its own.
 
@@ -548,11 +565,17 @@ class DownloadManager:
         """
         promoted = False
         claimed = False
-        prev_size = 0
+        # None until the first reading: seeding this at 0 made the first rate
+        # the whole file over one poll window, so a capture already 500 MB in
+        # when the watchdog first looked reported a wildly overstated speed
+        # for one tick before settling.
+        prev_size: int | None = None
         prev_at = time.monotonic()
         while True:
             await asyncio.sleep(PART_PROBE_S)
-            part = await asyncio.to_thread(self._captured_part, job, baseline)
+            part = await asyncio.to_thread(
+                self._captured_part, job, baseline, settings
+            )
             if part is None:
                 continue
             self._job_parts[job.id] = part
@@ -572,7 +595,9 @@ class DownloadManager:
                 events.publish({"type": "job.downloading", "job_id": job.id})
             now = time.monotonic()
             window = now - prev_at
-            speed = (size - prev_size) / window if window > 0 and size > prev_size else None
+            speed = None
+            if prev_size is not None and window > 0 and size > prev_size:
+                speed = (size - prev_size) / window
             prev_size, prev_at = size, now
             events.publish(
                 {
