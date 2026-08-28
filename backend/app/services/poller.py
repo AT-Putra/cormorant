@@ -92,8 +92,16 @@ def room_url(watch: models.CreatorWatch) -> str:
 
 # yt-dlp's normal answer for an idle room (BiliLiveIE raises "Streamer is not
 # live"). Offline is the expected state, not a broken sweep.
+#
+# The adverb is not optional in practice: TikTokLiveIE says "The channel is
+# not currently live", which `not live` does not match, so every idle tiktok
+# watch raised out of _live_info and published a watch.poll_error. Four
+# creators on a 300s sweep buried the activity feed in errors describing the
+# normal state. downloader._STREAM_OVER_MARKERS spells the same phrase out in
+# full; keep both in step when a platform invents a new wording.
 _OFFLINE_RE = re.compile(
-    r"not live|is offline|no longer live|live event will begin|hasn.t started",
+    r"not\s+(?:currently\s+)?live|is offline|no longer live"
+    r"|live event will begin|hasn.t started",
     re.IGNORECASE,
 )
 

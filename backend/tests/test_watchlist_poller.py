@@ -435,6 +435,39 @@ async def test_offline_room_is_not_a_poll_error(watch_env, monkeypatch):
     assert [e for e in errors if e.get("type") == "watch.poll_error"] == []
 
 
+async def test_idle_tiktok_room_is_not_a_poll_error(watch_env, monkeypatch):
+    """TikTok words it differently, and the adverb used to cost us the match.
+
+    TikTokLiveIE says "The channel is not currently live", which the offline
+    pattern's `not live` does not match -- so every idle tiktok watch raised
+    and published watch.poll_error once per sweep, describing the normal
+    state as a failure.
+    """
+    c, st = watch_env["client"], watch_env
+    _add_creator(c, url="https://www.tiktok.com/@someone", scope="lives")
+
+    import app.services.poller as pl
+
+    def offline(url, cookiefile=None, *, extract_flat=False, playlist_items=None):
+        raise RuntimeError(
+            "ERROR: [tiktok:live] someone: The channel is not currently live"
+        )
+
+    monkeypatch.setattr(pl.ytdlp, "probe", offline)
+
+    import app.services.events as events
+
+    errors = []
+    events.subscribe(errors.append)
+    try:
+        await st["sweep"]()
+    finally:
+        events.unsubscribe(errors.append)
+
+    assert not st["recorder"].started
+    assert [e for e in errors if e.get("type") == "watch.poll_error"] == []
+
+
 async def test_room_probe_failure_still_reports(watch_env, monkeypatch):
     """A dead room URL is a real error and must not hide behind 'offline'."""
     c, st = watch_env["client"], watch_env
