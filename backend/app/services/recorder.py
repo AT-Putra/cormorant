@@ -227,8 +227,18 @@ def engine_chain(
         # capture silently came from the streamlink retry instead.
         sys.executable, "-m", "yt_dlp", "--quiet", "--no-progress",
         "--plugin-dirs", "default", "--plugin-dirs", str(ytdlp.PLUGIN_ROOT),
+        # Same reason the in-process probes send it (ytdlp.HTTP_HEADERS): with
+        # yt-dlp's own Accept-Language, TikTok answers every page with a 200
+        # and a "Site Maintenance" stub, and the capture dies claiming the room
+        # is not live. A subprocess inherits none of the library options, so
+        # both engines have to be told on the command line, in their own
+        # spelling -- yt-dlp wants FIELD:VALUE, streamlink wants KEY=VALUE.
+        "--add-header", f"Accept-Language:{ytdlp.BROWSER_ACCEPT_LANGUAGE}",
     ]
-    streamlink_cmd = ["streamlink", "--quiet"]
+    streamlink_cmd = [
+        "streamlink", "--quiet",
+        "--http-header", f"Accept-Language={ytdlp.BROWSER_ACCEPT_LANGUAGE}",
+    ]
     if cookiefile:
         ytdlp_cmd += ["--cookies", cookiefile]
         streamlink_cmd += ["--http-cookies-file", cookiefile]

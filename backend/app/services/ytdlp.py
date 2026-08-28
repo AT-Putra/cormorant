@@ -40,6 +40,30 @@ class AbortDownload(Exception):
     """
 
 
+# yt-dlp's built-in Accept-Language is "en-us,en;q=0.5", and TikTok's edge now
+# blocks on it. The block is not an HTTP error: every www.tiktok.com page comes
+# back 200 with a 537-byte "Site Maintenance" body, so yt-dlp parses it happily,
+# finds no roomId in it, and raises UserNotLive — surfacing as "The channel is
+# not currently live" for a room that is live and has a working format ladder.
+#
+# Measured against a live room, three requests per variant, everything else held
+# equal (same handler, same UA, same Accept):
+#
+#     en-us,en;q=0.5  -> blocked 3/3      en-us,en;q=0.9  -> 242 KB page
+#     en-US,en;q=0.5  -> blocked 3/3      en-US,en;q=0.9  -> 242 KB page
+#
+# So it is the q-value, not the locale casing: real browsers send q=0.9 and
+# yt-dlp's 0.5 is the whole fingerprint. Sending what a browser sends fixes it.
+#
+# Deliberately NOT tiktok-only. This is a plain browser-truthful header with no
+# platform in it, the block cost a silent misdiagnosis rather than a loud error,
+# and a per-extractor exception here would have to be repeated in the recorder's
+# subprocess argv as well. Merged OVER yt-dlp's std_headers, so every other
+# default header it sets is untouched.
+BROWSER_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
+HTTP_HEADERS = {"Accept-Language": BROWSER_ACCEPT_LANGUAGE}
+
+
 # A resolution cap goes through format_sort, NEVER through a format filter.
 # These platforms serve vertical video: bilibili reports 1080p as 1080x1920,
 # so `bestvideo*[height<=1080]` throws away the whole 1080p AND 720p ladder
@@ -119,6 +143,7 @@ def build_opts(job, settings: dict | None = None, *, extra: dict | None = None) 
     else:
         name = "%(title).120B.%(ext)s"
     opts: dict[str, Any] = {
+        "http_headers": dict(HTTP_HEADERS),
         "format": getattr(job, "format_id", None) or "bestvideo*+bestaudio/best",
         "merge_output_format": s.get("container", "mp4"),
         "outtmpl": str(output_dir(job, s) / name),
@@ -180,6 +205,7 @@ def probe(
         "no_warnings": True,
         "skip_download": True,
         "extract_flat": extract_flat,
+        "http_headers": dict(HTTP_HEADERS),
     }
     if not extract_flat:
         # Anthologies (bilibili 合集) resolve to a playlist whose formats sit
@@ -214,7 +240,11 @@ def fetch_json(
     later, so an answer here is evidence about the real extraction rather
     than about a second, differently-configured HTTP client.
     """
-    opts: dict[str, Any] = {"quiet": True, "no_warnings": True}
+    opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "http_headers": dict(HTTP_HEADERS),
+    }
     if cookiefile:
         opts["cookiefile"] = cookiefile
     with YoutubeDL(opts) as ydl:
