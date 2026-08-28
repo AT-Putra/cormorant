@@ -17,8 +17,6 @@ from yt_dlp.globals import plugin_dirs as _plugin_dirs
 from yt_dlp.networking import Request
 from yt_dlp.plugins import load_all_plugins as _load_all_plugins
 
-from app.config import MEDIA_ROOT
-
 log = logging.getLogger(__name__)
 
 # Root passed to yt-dlp as a plugin search directory. Its children are the
@@ -76,7 +74,15 @@ def output_dir(job, settings: dict | None = None) -> Path:
 
     Recordings (US-008) pass a filename template embedding started_at so
     re-captures never collide or trip the dup check.
+
+    MEDIA_ROOT is read at call time, for the reason recording_output_path
+    gives: the module-level binding survives a test reload of app.config, so
+    every test that let a fake engine write a file put it under the developer's
+    real media directory instead of tmp_path -- where it then sat as leftover
+    state a later run could read back as if it were its own.
     """
+    from app.config import MEDIA_ROOT
+
     s = settings or {}
     fields = {
         "platform": _sanitize(getattr(job, "platform", "")),

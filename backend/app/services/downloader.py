@@ -29,6 +29,8 @@ DEFAULT_SPACE_FLOOR_PCT = 5.0
 WATCHER_INTERVAL_S = 30.0
 # Hysteresis margin (percentage points) before auto-resume, per plan step 15.
 RESUME_MARGIN_PCT = 2.0
+# How often the first-bytes watchdog looks for the engine's own .part.
+PART_PROBE_S = 2.0
 
 TERMINAL = {"done", "failed", "skipped"}
 
@@ -52,6 +54,53 @@ def free_space_pct(path: Path) -> float:
         return 0.0
 
 
+def part_snapshot(job) -> set[str]:
+    """.part files already in this job's output dir before its engine ran.
+
+    The dir is per creator, and the live RECORDER writes there too: an
+    auto-record and a queued download of the same room land side by side. So
+    "the largest .part here" is not necessarily this job's -- it can be a
+    capture ffmpeg is still writing, which this module would otherwise promote
+    on, rename out from under the recorder, and file as its own output.
+    Anything present before we start belongs to somebody else.
+    """
+    try:
+        return {str(p) for p in ytdlp.output_dir(job).glob("*.part") if p.is_file()}
+    except OSError:
+        return set()
+
+
+def terminate_engine_children(part: Path) -> int:
+    """Stop our own engine subprocesses writing `part`; returns how many.
+
+    Cancel is delivered by raising AbortDownload from a progress hook, and an
+    external downloader fires none while it runs -- so cancelling a live HLS
+    capture set the flag, marked the row 'cancelled', and left ffmpeg writing
+    to disk until the broadcast ended on its own.
+
+    yt-dlp spawns ffmpeg as a child of THIS process and hands it the temp
+    filename, so the path is what tells one capture from another when several
+    run at once. Match it exactly: cancelling one job must never reach into
+    another job's engine, or the live recorder's.
+    """
+    import psutil
+
+    needle = str(part)
+    stopped = 0
+    try:
+        children = psutil.Process().children(recursive=True)
+    except psutil.Error:
+        return 0
+    for child in children:
+        try:
+            if needle in (child.cmdline() or []):
+                child.terminate()
+                stopped += 1
+        except psutil.Error:
+            continue  # already gone, or not ours to look at
+    return stopped
+
+
 class DownloadManager:
     def __init__(self) -> None:
         self._queue: asyncio.Queue[int] = asyncio.Queue()
@@ -61,6 +110,8 @@ class DownloadManager:
         self._cancelled: set[int] = set()
         # Reconnect attempts per job, reset once a run completes.
         self._live_retries: dict[int, int] = {}
+        # Where each running job's engine is writing, so cancel can name it.
+        self._job_parts: dict[int, Path] = {}
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -144,6 +195,11 @@ class DownloadManager:
         self._cancelled.add(job_id)
         # setdefault covers cancel-before-worker-starts.
         self._abort_events.setdefault(job_id, threading.Event()).set()
+        # The event only reaches an engine that calls progress hooks; an
+        # external downloader does not, so name its process and stop it too.
+        part = self._job_parts.get(job_id)
+        if part is not None:
+            terminate_engine_children(part)
 
     def resume(self, job_id: int) -> None:
         """Re-enqueue a paused job — continuedl picks up .part files."""
@@ -190,6 +246,7 @@ class DownloadManager:
             self._abort_events[job.id] = abort
             progress_q: pyqueue.Queue = pyqueue.Queue()
             loop = asyncio.get_running_loop()
+            baseline = await asyncio.to_thread(part_snapshot, job)
 
             settings = {
                 "folder_template": await self._setting_str(
@@ -204,6 +261,9 @@ class DownloadManager:
 
             consumer = asyncio.create_task(
                 self._consume_progress(job.id, progress_q)
+            )
+            first_bytes = asyncio.create_task(
+                self._promote_on_first_bytes(job, baseline)
             )
             try:
                 extra: dict = {
@@ -251,7 +311,7 @@ class DownloadManager:
                 events.publish({"type": "job.done", "job_id": job.id})
             except ytdlp.AbortDownload:
                 if job.id in self._cancelled:
-                    self._cleanup_parts(job)
+                    self._cleanup_parts(job, baseline)
                     await self._set_status(
                         session, job, status="failed", error="cancelled"
                     )
@@ -261,8 +321,18 @@ class DownloadManager:
                     await self._set_status(session, job, "paused")
                     events.publish({"type": "job.paused", "job_id": job.id})
             except Exception as exc:
-                captured = self._captured_part(job)
-                if _is_stream_over(exc) and captured:
+                captured = self._captured_part(job, baseline)
+                if job.id in self._cancelled:
+                    # cancel() stopped the engine; whatever it raised on the
+                    # way down is that cancel, not a fault of its own. Without
+                    # this the Queue reported a killed capture as "ffmpeg
+                    # exited with code 255".
+                    self._cleanup_parts(job, baseline)
+                    await self._set_status(
+                        session, job, status="failed", error="cancelled"
+                    )
+                    events.publish({"type": "job.cancelled", "job_id": job.id})
+                elif _is_stream_over(exc) and captured:
                     # The host ended the stream: yt-dlp raises, but everything
                     # up to that point is on disk and is the whole recording.
                     out = self._finalize_part(captured)
@@ -314,6 +384,7 @@ class DownloadManager:
                         {"type": "job.failed", "job_id": job.id, "error": str(exc)[:200]}
                     )
             finally:
+                first_bytes.cancel()
                 progress_q.put(None)  # sentinel: consumer drains then exits
                 try:
                     await asyncio.wait_for(asyncio.shield(consumer), timeout=2)
@@ -321,6 +392,7 @@ class DownloadManager:
                     consumer.cancel()
                 self._abort_events.pop(job.id, None)
                 self._cancelled.discard(job.id)
+                self._job_parts.pop(job.id, None)
                 # Keep the counter only while a reconnect chain is in flight;
                 # any settled job starts fresh next time.
                 if job.status != "queued":
@@ -350,13 +422,20 @@ class DownloadManager:
         )
         return any(normalize_url(prior.url) == target for prior in rows)
 
-    def _captured_part(self, job: models.DownloadJob) -> Path | None:
-        """Largest non-empty .part for this job, if any bytes were captured."""
+    def _captured_part(
+        self, job: models.DownloadJob, baseline: set[str] | None = None
+    ) -> Path | None:
+        """Largest non-empty .part this job's own engine wrote, if any.
+
+        `baseline` is part_snapshot()'s reading from before the engine ran;
+        without it a shared output dir hands back the recorder's live capture.
+        """
+        skip = baseline or set()
         try:
             parts = [
                 p
                 for p in ytdlp.output_dir(job).glob("*.part")
-                if p.is_file() and p.stat().st_size > 0
+                if p.is_file() and str(p) not in skip and p.stat().st_size > 0
             ]
         except OSError:
             return None
@@ -372,15 +451,49 @@ class DownloadManager:
             log.warning("could not finalize %s", part)
             return part
 
-    def _cleanup_parts(self, job: models.DownloadJob) -> None:
-        """Cancel removes leftover .part/.ytdl temp fragments."""
+    def _cleanup_parts(
+        self, job: models.DownloadJob, baseline: set[str] | None = None
+    ) -> None:
+        """Cancel removes this job's leftover .part/.ytdl temp fragments.
+
+        Scoped by `baseline` for the reason part_snapshot spells out: the glob
+        also matches the live recorder's in-flight capture, and cancelling a
+        download must not delete somebody else's recording.
+        """
+        skip = baseline or set()
         try:
             for p in ytdlp.output_dir(job).glob("*.part*"):
-                p.unlink(missing_ok=True)
+                if str(p) not in skip:
+                    p.unlink(missing_ok=True)
             for p in ytdlp.output_dir(job).glob("*.ytdl"):
                 p.unlink(missing_ok=True)
         except OSError:
             log.warning("temp cleanup failed for job %s", job.id)
+
+    async def _promote_on_first_bytes(
+        self, job: models.DownloadJob, baseline: set[str]
+    ) -> None:
+        """Flip 'probing' -> 'downloading' for engines that report no progress.
+
+        yt-dlp hands a LIVE m3u8 to FFmpegFD, and ExternalFD fires exactly one
+        progress hook -- 'finished', after the capture is over. So the
+        hook-driven promotion in _consume_progress never runs for a tiktok
+        live, whose top tiers are all HLS: ffmpeg captured happily for hours
+        while the Queue showed the job stuck in 'probing' with no error and no
+        progress. Bilibili lives were fine by luck -- their FLV ladder is plain
+        https, which goes through HttpFD and does report bytes.
+
+        Bytes on disk are that same signal without the engine's cooperation.
+        """
+        while True:
+            await asyncio.sleep(PART_PROBE_S)
+            part = await asyncio.to_thread(self._captured_part, job, baseline)
+            if part is None:
+                continue
+            self._job_parts[job.id] = part
+            if await self._patch(job.id, status="downloading"):
+                events.publish({"type": "job.downloading", "job_id": job.id})
+            return
 
     async def _consume_progress(self, job_id: int, q: pyqueue.Queue) -> None:
         """Drain hook payloads (marshaled via call_soon_threadsafe) until the

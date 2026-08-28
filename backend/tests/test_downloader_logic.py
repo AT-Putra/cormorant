@@ -204,6 +204,165 @@ async def test_cancel_cleans_parts_and_fails(mgr, db, fake_engine):
     assert "cancelled" in (job.error or "")
 
 
+async def test_a_part_from_before_the_run_belongs_to_someone_else(mgr, db):
+    """The output dir is per creator, and the live recorder writes there too.
+
+    An auto-record and a queued download of the same room share a directory,
+    so "the largest .part here" could be a capture ffmpeg was still writing --
+    which this module would then rename out from under the recorder and file
+    as the job's own output, or delete outright on cancel.
+    """
+    from app.services import downloader as dl, ytdlp as y
+
+    job, add = make_job(db)
+    await add()
+    out = y.output_dir(job)
+    out.mkdir(parents=True, exist_ok=True)
+    recorder_capture = out / "live_20260828_100718.flv.part"
+    recorder_capture.write_bytes(b"0" * 999)
+
+    baseline = dl.part_snapshot(job)
+    assert str(recorder_capture) in baseline
+    # Not ours, however much bigger it is than anything we write.
+    assert mgr._captured_part(job, baseline) is None
+    mgr._cleanup_parts(job, baseline)
+    assert recorder_capture.is_file()
+
+    # What our own engine writes after the baseline is ours.
+    mine = out / "T.mp4.part"
+    mine.write_bytes(b"0" * 10)
+    assert mgr._captured_part(job, baseline) == mine
+
+
+async def test_engine_with_no_progress_hooks_still_leaves_probing(
+    mgr, db, fake_engine, monkeypatch
+):
+    """An external downloader reports nothing until the capture is over.
+
+    yt-dlp hands a LIVE m3u8 to FFmpegFD, and ExternalFD fires exactly one
+    progress hook -- 'finished', after the stream ends. So a tiktok live sat
+    in 'probing' for hours, no error and no progress, while ffmpeg was in fact
+    writing. Bytes on disk are the signal the engine will not give us.
+    """
+    import time
+
+    from app.services import downloader as dl, ytdlp as y
+    import app.services.events as events
+
+    monkeypatch.setattr(dl, "PART_PROBE_S", 0.01)
+    job, add = make_job(db)
+    jid = await add()
+
+    def silent_live(opts, url):
+        out = y.output_dir(job)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "T.mp4.part").write_bytes(b"0" * 32)
+        time.sleep(0.3)  # capture underway; not one hook fired
+        return FakeInfo(requested_downloads=[{"filepath": str(out / "T.mp4")}])
+
+    fake_engine.download = silent_live
+
+    seen = []
+    events.subscribe(seen.append)
+    try:
+        await mgr.run_job(jid)
+    finally:
+        events.unsubscribe(seen.append)
+
+    assert [e for e in seen if e.get("type") == "job.downloading"], (
+        "job never left 'probing': " + str([e.get("type") for e in seen])
+    )
+    assert (await fetch(db, jid)).status == "done"
+
+
+async def test_terminate_engine_children_stops_only_the_named_capture(tmp_path):
+    """Several captures can be in flight at once, in the same directory.
+
+    The temp filename is the only thing that tells them apart, so cancelling
+    one job must not reach into another job's engine -- or the live recorder's.
+    """
+    import subprocess
+    import sys
+
+    from app.services import downloader as dl
+
+    mine = tmp_path / "mine.mp4.part"
+    theirs = tmp_path / "theirs.mp4.part"
+    procs = [
+        subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", str(f)])
+        for f in (mine, theirs)
+    ]
+    try:
+        assert dl.terminate_engine_children(mine) == 1
+        procs[0].wait(timeout=10)
+        assert procs[1].poll() is None  # the other capture is untouched
+    finally:
+        for proc in procs:
+            proc.kill()
+
+
+async def test_cancel_stops_an_engine_that_reports_no_progress(
+    mgr, db, fake_engine, monkeypatch
+):
+    """Cancel used to be delivered only through a progress hook.
+
+    An external downloader fires none while it runs, so cancelling a live HLS
+    capture marked the row and left ffmpeg writing until the broadcast ended
+    by itself -- and the bytes it kept writing were in a directory the live
+    recorder shares.
+    """
+    import threading as _threading
+
+    from app.services import downloader as dl, ytdlp as y
+    import app.services.events as events
+
+    monkeypatch.setattr(dl, "PART_PROBE_S", 0.01)
+    job, add = make_job(db)
+    jid = await add()
+
+    stopped = _threading.Event()
+    killed: list = []
+
+    def fake_terminate(part):
+        killed.append(part)
+        stopped.set()
+        return 1
+
+    monkeypatch.setattr(dl, "terminate_engine_children", fake_terminate)
+
+    def silent_live(opts, url):
+        out = y.output_dir(job)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "T.mp4.part").write_bytes(b"0" * 32)
+        if not stopped.wait(5):  # no hook to poll: only a kill ends this
+            raise AssertionError("engine was never stopped")
+        raise RuntimeError("ffmpeg exited with code 255")
+
+    fake_engine.download = silent_live
+
+    seen = []
+    events.subscribe(seen.append)
+    try:
+        task = asyncio.create_task(mgr.run_job(jid))
+        for _ in range(300):  # wait for the watchdog to name this job's .part
+            await asyncio.sleep(0.01)
+            if jid in mgr._job_parts:
+                break
+        assert jid in mgr._job_parts, "watchdog never found the engine's output"
+        mgr.cancel(jid)
+        await asyncio.wait_for(task, timeout=10)
+    finally:
+        events.unsubscribe(seen.append)
+
+    assert killed == [y.output_dir(job) / "T.mp4.part"]
+    job_row = await fetch(db, jid)
+    assert job_row.status == "failed"
+    # The engine's dying words must not surface as the reason.
+    assert job_row.error == "cancelled"
+    assert [e for e in seen if e.get("type") == "job.cancelled"]
+    assert mgr._job_parts == {}
+
+
 async def test_space_floor_gate_pauses_auto_only(mgr, db, fake_engine, monkeypatch):
     from app.services import downloader as dl
 
