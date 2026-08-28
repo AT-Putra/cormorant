@@ -96,6 +96,73 @@ def test_stream_full_and_ranges(client):
     assert r.status_code == 416
 
 
+def test_stream_spans_many_chunks_without_buffering_the_file(client):
+    """Reads are chunked, so the boundaries are where a rewrite breaks.
+
+    The case above fits inside a single CHUNK and so never crossed one. It
+    also matters that both whole-file shapes work: a browser opens <video>
+    with 'Range: bytes=0-' and a download link sends no Range at all, and
+    both are served straight through rather than joined in memory first.
+    """
+    from app.routers.library import CHUNK
+
+    c, db, tmp = client
+    # Several chunks, plus a ragged tail so the last read is a short one.
+    payload = bytes(range(256)) * ((CHUNK * 2) // 256) + b"tail-bytes"
+    assert len(payload) > CHUNK * 2
+    iid = _seed_item(db, tmp, name="big.mp4", content=payload)
+
+    # No Range at all: the download link's shape.
+    r = c.get(f"/api/library/{iid}/stream")
+    assert r.status_code == 200
+    assert int(r.headers["content-length"]) == len(payload)
+    assert r.content == payload
+
+    # 'bytes=0-': the <video> shape. Same bytes, as a 206.
+    r = c.get(f"/api/library/{iid}/stream", headers={"Range": "bytes=0-"})
+    assert r.status_code == 206
+    assert r.content == payload
+
+    # A window straddling a chunk boundary must not drop or double bytes.
+    start, end = CHUNK - 10, CHUNK + 9
+    r = c.get(
+        f"/api/library/{iid}/stream", headers={"Range": f"bytes={start}-{end}"}
+    )
+    assert r.status_code == 206
+    assert r.content == payload[start : end + 1]
+    assert len(r.content) == 20
+
+    # The download variant still delivers every byte, with the attachment header.
+    r = c.get(f"/api/library/{iid}/stream?download=1")
+    assert r.status_code == 200
+    assert "attachment" in r.headers["content-disposition"]
+    assert r.content == payload
+
+
+async def test_iter_file_range_never_materialises_the_whole_span(tmp_path):
+    """The point of the rewrite is the memory, and the test above cannot see
+    it -- a buffered read returns the same correct bytes. Assert the property
+    directly: no single piece handed to the response exceeds one CHUNK, so a
+    gigabyte capture is never a gigabyte in RAM.
+    """
+    from app.routers.library import CHUNK, _iter_file_range
+
+    payload = bytes(range(256)) * ((CHUNK * 2) // 256) + b"ragged"
+    f = tmp_path / "big.bin"
+    f.write_bytes(payload)
+
+    chunks = [c async for c in _iter_file_range(f, (0, len(payload) - 1))]
+
+    assert len(chunks) > 2, "served in one piece; that is the bug"
+    assert max(len(c) for c in chunks) <= CHUNK
+    assert b"".join(chunks) == payload
+
+    # A sub-span is bounded the same way and stays exact.
+    start, end = CHUNK - 5, CHUNK + 4
+    part = [c async for c in _iter_file_range(f, (start, end))]
+    assert b"".join(part) == payload[start : end + 1]
+
+
 # 4. thumbnail missing -> 404, present -> served
 def test_thumbnail_serving(client):
     c, db, tmp = client

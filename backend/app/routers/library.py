@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,7 +77,7 @@ async def get_thumbnail(
     item = await _get_item_or_404(item_id, session)
     if not item.thumbnail_path or not Path(item.thumbnail_path).is_file():
         raise HTTPException(404, detail="Thumbnail not found")
-    data = await _read_file_range(Path(item.thumbnail_path), None)
+    data = await _read_whole_file(Path(item.thumbnail_path))
     media_type = {
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
@@ -145,33 +145,53 @@ async def stream_item(
             f"attachment; filename*=UTF-8''{quote(path.name, safe='')}"
         )
 
-    body = await _read_file_range(path, (start, end))
-    return Response(content=body, status_code=status, headers=headers)
+    return StreamingResponse(
+        _iter_file_range(path, (start, end)),
+        status_code=status,
+        headers=headers,
+    )
 
 
-async def _read_file_range(path: Path, span: tuple[int, int] | None) -> bytes:
-    """Read [start,end] off the event loop via to_thread chunks."""
+async def _iter_file_range(path: Path, span: tuple[int, int]):
+    """Yield [start,end] in CHUNK pieces, each read off the event loop.
+
+    Streamed rather than joined into one bytes object. Both ways of asking for
+    a whole file arrive here: a browser opens <video> with 'Range: bytes=0-',
+    and a download link sends no Range at all, which leaves start/end at
+    0/total-1. The buffered read then pulled an entire recording into memory
+    -- twice over, transiently, because b"".join allocates a second copy while
+    the chunk list is still alive -- before a single byte went out. A 626 MB
+    capture peaked around 1.25 GB and a 1.18 GB one around 2.4 GB, on a VM
+    with about 2.8 GB free. Captures only get longer.
+
+    Range parsing above is untouched: same 206/416 handling, same
+    Content-Length and Content-Range. Only where the bytes live changes.
+    """
+    import anyio
+
+    remaining = span[1] - span[0] + 1
+    with open(path, "rb") as f:
+        f.seek(span[0])
+        while remaining > 0:
+            chunk = await anyio.to_thread.run_sync(f.read, min(CHUNK, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+async def _read_whole_file(path: Path) -> bytes:
+    """Read a file into memory off the event loop.
+
+    Thumbnails only. Media goes through _iter_file_range instead, which is
+    why this no longer takes a span: buffering is fine for a sidecar .jpg and
+    is exactly what must not happen to a gigabyte of capture.
+    """
     import anyio
 
     def _read() -> bytes:
-        parts: list[bytes] = []
         with open(path, "rb") as f:
-            if span is None:
-                while True:
-                    chunk = f.read(CHUNK)
-                    if not chunk:
-                        break
-                    parts.append(chunk)
-            else:
-                f.seek(span[0])
-                remaining = span[1] - span[0] + 1
-                while remaining > 0:
-                    chunk = f.read(min(CHUNK, remaining))
-                    if not chunk:
-                        break
-                    parts.append(chunk)
-                    remaining -= len(chunk)
-        return b"".join(parts)
+            return f.read()
 
     return await anyio.to_thread.run_sync(_read)
 
