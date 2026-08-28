@@ -315,6 +315,111 @@ async def test_failed_remux_keeps_and_registers_the_capture(sup, db, monkeypatch
     assert out.with_suffix(".flv").is_file()
 
 
+async def test_capture_under_a_part_name_is_still_finalized(sup, db, monkeypatch):
+    """An engine that never renamed its temp file still recorded something.
+
+    yt-dlp writes <name>.part and renames on a clean exit. The supervisor used
+    to look only for the renamed file, so anything that cut the engine short
+    counted as "produced no output": no remux, no library item, and the bytes
+    left for the orphan sweep to file ten minutes later as "(recovered)".
+    """
+    out = pin_out(monkeypatch, "part.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    part = out.with_suffix(".flv.part")
+    script_spawns(monkeypatch, [FakeProc(exit_code=0)])
+    real_spawn = rec_mod.asyncio.create_subprocess_exec
+
+    async def spawn_touch(*cmd, **kwargs):
+        part.write_bytes(b"0" * 64)  # temp name only: no rename ever happened
+        return await real_spawn(*cmd, **kwargs)
+
+    monkeypatch.setattr(rec_mod.asyncio, "create_subprocess_exec", spawn_touch)
+
+    rid = await make_recording(db)()
+    await asyncio.wait_for(sup.start_recording(rid), timeout=5)
+
+    rec = await fetch(db, rid)
+    assert rec.status == "finished"
+    assert rec.output_path == str(out)
+    assert out.is_file()
+    # Nothing left under a temp name for the orphan sweep to file a second time.
+    assert not part.exists()
+
+
+async def test_stop_finalizes_the_part_the_engine_left(sup, db, monkeypatch):
+    """The user-stop path end to end: a stopped capture is a kept capture."""
+    out = pin_out(monkeypatch, "stopped_part.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    part = out.with_suffix(".flv.part")
+    proc = FakeProc(exit_code=-2, delay=999)
+
+    def on_sig(sig):
+        part.write_bytes(b"0" * 128)  # engine dies mid-write, temp name stays
+        proc._delay = 0.0
+
+    proc.on_signal = on_sig
+    script_spawns(monkeypatch, [proc])
+    sup.grace_s = 5.0
+
+    rid = await make_recording(db)()
+    task = sup.start_recording(rid)
+    await asyncio.sleep(0.05)
+    assert await sup.stop(rid) is True
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+
+    rec = await fetch(db, rid)
+    assert rec.status == "ended"
+    assert rec.output_path == str(out)
+    assert not part.exists()
+    async with db.async_session() as s:
+        items = (await s.execute(select(models.LibraryItem))).scalars().all()
+    assert [i.file_path for i in items] == [str(out)]
+
+
+async def test_failed_remux_still_drops_the_part_suffix(sup, db, monkeypatch):
+    """Keeping the bytes must not mean leaving them under a temp name."""
+    out = pin_out(monkeypatch, "keep_part.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    part = out.with_suffix(".flv.part")
+
+    async def _fails(src, dst):
+        return False
+
+    monkeypatch.setattr(rec_mod, "remux_to_mp4", _fails)
+    script_spawns(monkeypatch, [FakeProc(exit_code=0)])
+    real_spawn = rec_mod.asyncio.create_subprocess_exec
+
+    async def spawn_touch(*cmd, **kwargs):
+        part.write_bytes(b"0" * 64)
+        return await real_spawn(*cmd, **kwargs)
+
+    monkeypatch.setattr(rec_mod.asyncio, "create_subprocess_exec", spawn_touch)
+
+    rid = await make_recording(db)()
+    await asyncio.wait_for(sup.start_recording(rid), timeout=5)
+
+    rec = await fetch(db, rid)
+    assert rec.status == "finished"
+    assert rec.output_path == str(out.with_suffix(".flv"))
+    assert out.with_suffix(".flv").is_file()
+    assert not part.exists()
+
+
+async def test_a_capture_that_wrote_nothing_clears_its_claim(sup, db, monkeypatch):
+    """The claim is staked before the first byte; a dry run must retract it,
+    or the row advertises a path that was never created."""
+    out = pin_out(monkeypatch, "dry.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    script_spawns(monkeypatch, [FakeProc(exit_code=0)])
+
+    rid = await make_recording(db)()
+    await asyncio.wait_for(sup.start_recording(rid), timeout=5)
+
+    rec = await fetch(db, rid)
+    assert rec.status == "failed"
+    assert rec.output_path is None
+
+
 async def test_capture_path_is_claimed_before_the_first_byte(sup, db, monkeypatch):
     """recovery reads active recordings' output_path to decide what is an
     orphan. While that stayed NULL until finalize, a running capture claimed
@@ -452,7 +557,7 @@ async def test_supervise_all_engines_fail_marks_failed(sup, db, monkeypatch):
 # ---- stop path ---------------------------------------------------------------
 
 
-async def test_stop_sigterm_then_kill_tree_marks_ended(sup, db, monkeypatch):
+async def test_stop_sigint_then_kill_tree_marks_ended(sup, db, monkeypatch):
     # SIGKILLed engines die with -9; the fake honors the mock kill by ending.
     long_proc = FakeProc(pid=4242, exit_code=-9, delay=999)
     pin_out(monkeypatch, "stopped.mp4")
@@ -472,7 +577,7 @@ async def test_stop_sigterm_then_kill_tree_marks_ended(sup, db, monkeypatch):
     assert await sup.stop(rid) is True
     await asyncio.wait_for(asyncio.shield(task), timeout=5)
 
-    assert long_proc.signals.count(signal.SIGTERM) == 1
+    assert long_proc.signals.count(signal.SIGINT) == 1
     assert kills == [long_proc.pid]  # grace expired -> tree killed
     rec = await fetch(db, rid)
     assert rec.status == "ended"
@@ -481,7 +586,7 @@ async def test_stop_sigterm_then_kill_tree_marks_ended(sup, db, monkeypatch):
 
 async def test_stop_graceful_exit_within_window_no_kill(sup, db, monkeypatch):
     proc = FakeProc(delay=999)
-    # A well-behaved engine dies promptly on SIGTERM with code 0.
+    # A well-behaved engine dies promptly on SIGINT with code 0.
     proc.on_signal = lambda sig: setattr(proc, "_delay", 0.0)
     pin_out(monkeypatch, "graceful.mp4")
     script_spawns(monkeypatch, [proc])
@@ -498,7 +603,7 @@ async def test_stop_graceful_exit_within_window_no_kill(sup, db, monkeypatch):
     assert await sup.stop(rid) is True
     await asyncio.wait_for(asyncio.shield(task), timeout=5)
 
-    assert proc.signals.count(signal.SIGTERM) == 1
+    assert proc.signals.count(signal.SIGINT) == 1
     assert proc.returncode == 0
     rec = await fetch(db, rid)
     assert rec.status == "ended"  # intended stop, not 'finished'/'failed'

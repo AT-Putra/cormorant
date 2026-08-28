@@ -138,6 +138,49 @@ def recording_output_path(platform: str, creator: str, started_at: datetime) -> 
     )
 
 
+def part_path(capture: Path) -> Path:
+    """Where an engine writes before it renames: <capture>.part."""
+    return capture.with_name(capture.name + ".part")
+
+
+def captured_file(capture: Path) -> Path | None:
+    """The bytes the engine actually wrote, finished name or temp name.
+
+    yt-dlp writes <name>.part and renames on a clean exit -- and an engine
+    that takes a signal never reaches the rename. The supervisor used to look
+    only for the renamed file, so a stopped capture counted as having produced
+    nothing: no remux, no library item, and a row still advertising a path
+    that was never created. The bytes survived only because the orphan sweep
+    collected them ten minutes later under a "(recovered)" title, which is a
+    safety net doing a job that belongs here.
+    """
+    for candidate in (capture, part_path(capture)):
+        try:
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def drop_part_suffix(path: Path) -> Path:
+    """Rename <x>.part -> <x>; returns the name the file now has.
+
+    Anything left under a .part name is what services/recovery collects as an
+    orphan, so finalizing has to consume the temp name or the same bytes get
+    filed a second time as a separate "(recovered)" library item.
+    """
+    if path.suffix != ".part":
+        return path
+    final = path.with_suffix("")
+    try:
+        path.replace(final)
+        return final
+    except OSError:
+        log.warning("could not drop .part from %s", path.name)
+        return path
+
+
 def engine_chain(
     room_url: str,
     outtmpl: str,
@@ -279,15 +322,22 @@ class RecorderSupervisor:
         return asyncio.create_task(self._supervise(recording_id))
 
     async def stop(self, recording_id: int) -> bool:
-        """Graceful stop: SIGTERM to the group, grace window, then kill.
-        Records 'ended' intent so the exit handler doesn't mark 'failed'."""
+        """Graceful stop: SIGINT to the group, grace window, then kill.
+        Records 'ended' intent so the exit handler doesn't mark 'failed'.
+
+        SIGINT, not SIGTERM, because the engines are Python: it arrives as
+        KeyboardInterrupt, which yt-dlp's ExternalFD treats as a clean stop --
+        it asks ffmpeg to quit, keeps the bytes and renames the .part. SIGTERM
+        has no handler, so the process died where it stood and every user stop
+        left a temp file the supervisor then read as "produced nothing".
+        captured_file covers the deaths no signal choice can make graceful."""
         entry = self._registry.get(recording_id)
         if not entry or entry[0] is None:
             return False
         proc = entry[0]
         self._intended[recording_id] = "ended"
         try:
-            _signal_group(proc, signal.SIGTERM)
+            _signal_group(proc, signal.SIGINT)
         except ProcessLookupError:
             pass  # already gone; exit handler below still finalizes
         loop = asyncio.get_running_loop()
@@ -394,17 +444,18 @@ class RecorderSupervisor:
             if cookiefile:
                 cookiefile.unlink(missing_ok=True)
 
-        produced = capture_path.exists() and capture_path.stat().st_size > 0
+        # Whatever the engine left behind, under either name (captured_file).
+        captured = captured_file(capture_path)
         # Finalize even for a user stop: an intentionally ended recording is
         # still a recording someone wants to watch.
-        final_path = await self._finalize_container(capture_path, out_path) if produced else None
+        final_path = await self._finalize_container(captured, out_path) if captured else None
         intended = self._intended.pop(recording_id, None) or (
             "ended" if chain_broken_by_stop else None
         )
 
         if intended:
             await self._finalize(recording_id, intended, final_path, None)
-        elif rc == 0 and produced:
+        elif rc == 0 and captured:
             await self._finalize(recording_id, "finished", final_path, None)
         else:
             await self._finalize(
@@ -415,12 +466,13 @@ class RecorderSupervisor:
         """FLV capture -> MP4 for the library. Returns what to register.
 
         A failed remux keeps the FLV and registers that: a file the user has
-        to work to open beats a recording that silently is not there.
+        to work to open beats a recording that silently is not there. Either
+        way the .part suffix goes -- see drop_part_suffix.
         """
         if await remux_to_mp4(capture, dst):
             capture.unlink(missing_ok=True)
             return dst
-        return capture
+        return drop_part_suffix(capture)
 
     async def _finalize(
         self,
@@ -440,6 +492,11 @@ class RecorderSupervisor:
                 rec.ended_at = models.utcnow()
             if out_path is not None:
                 rec.output_path = str(out_path)
+            else:
+                # The path was claimed before the first byte so the orphan
+                # sweep would not collect a running capture. Nothing came of
+                # it, so stop pointing at a file that does not exist.
+                rec.output_path = None
             if status in ("finished", "ended") and out_path is not None and out_path.exists():
                 session.add(
                     models.LibraryItem(
