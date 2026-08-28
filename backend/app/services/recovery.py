@@ -95,8 +95,21 @@ async def remux_and_register(part: Path) -> models.LibraryItem | None:
     Returns None when nothing was produced or the row already existed.
     """
     final = recovered_name(part)
-    if final.exists() or not part.exists():
+    if not part.exists():
         return None
+    if final.exists():
+        # A rescue that finished deletes its source, so a recovered file
+        # sitting NEXT TO the .part it came from is the debris of one that was
+        # cut off partway -- a container stop during the remux is the way to
+        # get one. The guard here used to read that as "already recovered" and
+        # return, which stranded the orphan permanently: nothing else deletes
+        # either file, so every later sweep took the same early exit and the
+        # real capture stayed a .part forever.
+        log.warning(
+            "discarding partial recovery %s and retrying %s",
+            final.name, part.name,
+        )
+        final.unlink(missing_ok=True)
 
     # ponytail: blocking ffmpeg via to_thread instead of exec — output is
     # unbounded but bounded by disk; switch to create_subprocess_exec with

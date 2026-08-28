@@ -124,6 +124,48 @@ def _ok_ffmpeg(cmd, **kw):
     return SimpleNamespace(returncode=0, stdout="", stderr="")
 
 
+def test_a_partial_recovery_is_retried_not_treated_as_done(media_root, monkeypatch):
+    """A remux cut off partway must not strand the orphan for good.
+
+    The rescue that finishes deletes its source, so a recovered file sitting
+    NEXT TO the .part it came from is debris, not a result. Reading it as
+    "already recovered" made every later sweep take the same early exit, and
+    the real capture stayed a .part forever -- nothing else on the system
+    clears either file. Restarting during a rescue is how you get one.
+    """
+    root: Path = media_root
+    d = root / "tiktok" / "someone"
+    d.mkdir(parents=True)
+    part = d / "live_x.flv.part"
+    part.write_bytes(bytes(4096))
+    partial = rec.recovered_name(part)
+    partial.write_bytes(b"tr")  # debris of the attempt that was cut off
+
+    monkeypatch.setattr(rec.subprocess, "run", _ok_ffmpeg)
+
+    item = asyncio.run(rec.remux_and_register(part))
+
+    assert item is not None, "refused to retry a partial recovery"
+    assert partial.read_bytes() == b"MP4fake"  # redone, not left as debris
+    assert not part.exists()  # source consumed by the completed rescue
+
+
+def test_an_already_recovered_orphan_is_not_redone(media_root, monkeypatch):
+    """The other half of the rule: a rescue that finished stays finished."""
+    root: Path = media_root
+    d = root / "tiktok" / "someone"
+    d.mkdir(parents=True)
+    part = d / "live_y.flv.part"
+    # No .part on disk -- the finished rescue consumed it.
+    rec.recovered_name(part).write_bytes(b"MP4fake")
+
+    def _boom(cmd, **kw):
+        raise AssertionError("remuxed an orphan that was already recovered")
+
+    monkeypatch.setattr(rec.subprocess, "run", _boom)
+    assert asyncio.run(rec.remux_and_register(part)) is None
+
+
 def test_sweep_recovers_orphan_skips_active(media_root, monkeypatch):
     root: Path = media_root
     orphan_dir = root / "bili" / "creator"
