@@ -1,4 +1,4 @@
-"""Two repairs to yt-dlp's TikTok live extractor, both measured on live rooms.
+"""Three repairs to yt-dlp's TikTok live extractor, all measured on live rooms.
 
 1. A dead HLS fallback kills the whole extraction.
 
@@ -38,6 +38,33 @@
    without FLV they fall back to an H.264 720p ceiling. Ties between the two
    containers resolve through yt-dlp's own `ext` sort, which puts mp4 ahead
    of flv — so HLS still wins when a tier offers both.
+
+3. The room id is scraped off a page a WAF no longer serves.
+
+   TikTokLiveIE gets room_id by downloading www.tiktok.com HTML and reading
+   SIGI_STATE / universal data out of it. TikTok now answers that host with a
+   JS challenge -- 200 OK, ~1.1 KB, SlardarWAF / _wafchallengeid / "Please
+   wait..." -- which a browser solves by running the script and yt-dlp cannot.
+   No roomId is in the stub, so _real_extract raises UserNotLive and every
+   live path reports "The channel is not currently live" for a running room.
+
+   The challenge covers HTML routes only. Measured from the deploy host, same
+   minute, same cookies: www.tiktok.com/@user and /@user/live both challenged
+   (with and without curl_cffi impersonation, every target), while
+   www.tiktok.com/api-live/user/room/ returned ordinary JSON carrying
+   data.user.roomId, and webcast/room/info answered 57 KB with status == 2.
+   So only the room-id lookup is broken; everything downstream still works.
+
+   Resolved here off that JSON endpoint, then the base extractor is handed the
+   m.tiktok.com/share/live/<room_id> form its own _VALID_URL already accepts,
+   so it never needs the page. It still makes one soft request for the
+   uploader handle, which the challenge fails harmlessly (fatal=False); the
+   handle is put back afterwards, since only the error path uses it.
+
+   While the challenge stands the HEVC ladder in repair 2 is unreachable --
+   it lives in that same HTML -- so rooms fall back to the H.264 ladder.
+   _hevc_formats already degrades to [] on its own, so this needs no guard and
+   recovers by itself when the challenge lifts.
 """
 
 import json
@@ -52,6 +79,8 @@ from yt_dlp.utils import ExtractorError, int_or_none, traverse_obj, url_or_none
 
 class TikTokLiveIE(_TikTokLiveIE):
     _FALLBACK_EP = 'www.tiktok.com/api/live/detail'
+    # The JSON twin of the WAF-challenged /@<uploader>/live page (repair 3).
+    _ROOM_ID_EP = 'https://www.tiktok.com/api-live/user/room/'
 
     # Where each HEVC tier sits on the SAME 0-9 scale the base extractor gets
     # from qualities(('SD1','ld','SD2','sd','HD1','hd','FULL_HD1','uhd',
@@ -119,10 +148,36 @@ class TikTokLiveIE(_TikTokLiveIE):
                 })
         return formats
 
+    def _room_id_from_api(self, uploader):
+        """room_id off the JSON endpoint, or None for any reason.
+
+        None is not a failure to report: the caller falls back to the base
+        extractor's own scrape, which is still correct whenever the page is
+        reachable, and raises the usual UserNotLive when it genuinely is not.
+        """
+        return traverse_obj(self._download_json(
+            self._ROOM_ID_EP, uploader, fatal=False,
+            note='Resolving the room id without the webpage',
+            errnote='Room id endpoint unavailable',
+            query={'aid': '1988', 'sourceType': 54, 'uniqueId': uploader},
+        ), ('data', 'user', 'roomId', {str}, filter))
+
     def _real_extract(self, url):
+        uploader, room_id = self._match_valid_url(url).group('uploader', 'id')
+        if uploader and not room_id:
+            room_id = self._room_id_from_api(uploader)
+            if room_id:
+                url = f'https://m.tiktok.com/share/live/{room_id}'
+
         info = super()._real_extract(url)
+        if uploader:
+            # The share/live form carries no handle, and the base extractor
+            # only fills one in from the page it can no longer read.
+            info.setdefault('uploader', uploader)
         try:
-            extra = self._hevc_formats(url, info.get('id'))
+            extra = self._hevc_formats(
+                f'https://www.tiktok.com/@{uploader}/live' if uploader else url,
+                info.get('id'))
         except Exception as exc:
             # Never let the bonus ladder cost a capture that already works.
             self.report_warning(f'HEVC ladder unavailable: {exc}')

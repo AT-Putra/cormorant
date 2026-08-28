@@ -239,3 +239,84 @@ def test_hevc_1080p60_outranks_the_h264_720p(monkeypatch):
 def test_unreadable_page_leaves_the_base_formats_alone(monkeypatch):
     ie = _ie_with_page(monkeypatch, "")  # WAF challenge, redirect, anything
     assert ie._hevc_formats("https://x/live", "room-1") == []
+
+
+# ---- repair 3: the room id no longer comes off the webpage ----------------
+#
+# TikTok now answers www.tiktok.com HTML with a JS challenge yt-dlp cannot run,
+# so the base extractor finds no roomId and reports a live room as offline. The
+# id is read off api-live/user/room instead, and the base extractor is handed
+# the share/live form its own _VALID_URL accepts. These pin both halves: the
+# id actually being read, and the page scrape still getting its chance when the
+# endpoint says nothing.
+
+
+def _ie_with_room_endpoint(monkeypatch, payload):
+    """The real extractor with the room-id endpoint stubbed to `payload`."""
+    from yt_dlp import YoutubeDL
+
+    active, _ = _live_ie_class()
+    ie = active(YoutubeDL({"quiet": True, "no_warnings": True}))
+    monkeypatch.setattr(type(ie), "_download_json", lambda *a, **k: payload)
+    return ie
+
+
+def test_room_id_comes_from_the_json_endpoint(monkeypatch):
+    ie = _ie_with_room_endpoint(
+        monkeypatch, {"data": {"user": {"roomId": "7679151507547179797"}}})
+    assert ie._room_id_from_api("lalaaaey") == "7679151507547179797"
+
+
+@pytest.mark.parametrize("payload", [
+    None,                                  # fatal=False turns a failure into this
+    {},                                    # reshaped or empty answer
+    {"data": {"user": {}}},                # user known, no room
+    {"data": {"user": {"roomId": ""}}},    # how an idle creator reports it
+])
+def test_no_room_id_reads_as_none(monkeypatch, payload):
+    ie = _ie_with_room_endpoint(monkeypatch, payload)
+    assert ie._room_id_from_api("someone") is None
+
+
+def _ie_recording_the_base_url(monkeypatch, room_id):
+    """Plugin extractor that records the URL it hands the base extractor."""
+    from yt_dlp import YoutubeDL
+
+    active, builtin = _live_ie_class()
+    seen = {}
+
+    def fake_real_extract(self, url):
+        seen["url"] = url
+        return {"id": "room", "formats": []}
+
+    monkeypatch.setattr(builtin, "_real_extract", fake_real_extract)
+    ie = active(YoutubeDL({"quiet": True, "no_warnings": True}))
+    monkeypatch.setattr(type(ie), "_room_id_from_api", lambda self, u: room_id)
+    monkeypatch.setattr(type(ie), "_hevc_formats", lambda self, url, vid: [])
+    return ie, seen
+
+
+def test_live_url_is_rewritten_to_the_share_form(monkeypatch):
+    ie, seen = _ie_recording_the_base_url(monkeypatch, "7679151507547179797")
+    info = ie._real_extract("https://www.tiktok.com/@lalaaaey/live")
+    assert seen["url"] == "https://m.tiktok.com/share/live/7679151507547179797"
+    # the share form carries no handle, so the plugin has to put it back
+    assert info["uploader"] == "lalaaaey"
+
+
+def test_unresolvable_room_id_still_lets_the_page_be_tried(monkeypatch):
+    ie, seen = _ie_recording_the_base_url(monkeypatch, None)
+    ie._real_extract("https://www.tiktok.com/@lalaaaey/live")
+    assert seen["url"] == "https://www.tiktok.com/@lalaaaey/live"
+
+
+def test_hevc_ladder_still_reads_the_uploader_page(monkeypatch):
+    """The rewrite must not send the HEVC scrape at the share URL, which
+    carries none of the SIGI blob it needs."""
+    ie, _seen = _ie_recording_the_base_url(monkeypatch, "42")
+    asked = {}
+    monkeypatch.setattr(
+        type(ie), "_hevc_formats",
+        lambda self, url, vid: asked.setdefault("url", url) and [])
+    ie._real_extract("https://www.tiktok.com/@lalaaaey/live")
+    assert asked["url"] == "https://www.tiktok.com/@lalaaaey/live"
