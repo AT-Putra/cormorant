@@ -271,6 +271,70 @@ def test_sweep_recovers_orphan_skips_active(media_root, monkeypatch):
     assert asyncio.run(rec.recovery.sweep_once()) == 0
 
 
+def _seed_job(status: str, output_path: str | None):
+    """Insert one DownloadJob row into the fresh isolated test DB."""
+    from app.db import init_db
+    from app.models import DownloadJob
+
+    async def _go():
+        await init_db()
+        import app.db as db_mod
+
+        async with db_mod.async_session() as s:
+            s.add(
+                DownloadJob(
+                    url="https://www.tiktok.com/@someone/live",
+                    platform="tiktok",
+                    kind="video",
+                    title="T",
+                    creator="someone",
+                    status=status,
+                    output_path=output_path,
+                )
+            )
+            await s.commit()
+
+    asyncio.run(_go())
+
+
+def test_a_paused_jobs_capture_is_not_collected_as_an_orphan(
+    media_root, monkeypatch
+):
+    """Pause keeps the .part on disk so Resume can continue it.
+
+    The sweep only shielded queued/probing/downloading jobs, so a paused one
+    claimed nothing: its capture was collected as abandoned, remuxed away and
+    its source deleted, leaving Resume with nothing to continue from. Caught
+    with 1.9 GB of paused live captures one sweep away from exactly that.
+    """
+    root: Path = media_root
+    paused_dir = root / "tiktok" / "someone"
+    orphan_dir = root / "tiktok" / "nobody"
+    for d in (paused_dir, orphan_dir):
+        d.mkdir(parents=True)
+
+    resumable = paused_dir / "T.mp4.part"
+    resumable.write_bytes(bytes(4096))
+    orphan = orphan_dir / "live_gone.flv.part"
+    orphan.write_bytes(bytes(64))
+
+    # The job claims the name it is writing, minus the .part suffix.
+    _seed_job("paused", str(paused_dir / "T.mp4"))
+
+    async def instant_true(_path):
+        return True
+
+    monkeypatch.setattr(rec, "_size_stable", instant_true)
+    monkeypatch.setattr(rec.subprocess, "run", _ok_ffmpeg)
+
+    n = asyncio.run(rec.recovery.sweep_once())
+
+    assert n == 1  # the real orphan, and only it
+    assert resumable.is_file(), "swept a paused job's capture out from under it"
+    assert not (paused_dir / "T_recovered.mp4").exists()
+    assert not orphan.exists()  # genuinely abandoned, so collected as before
+
+
 def test_sweep_leaves_growing_file_alone(media_root, monkeypatch):
     """A .part whose size still changes is never remuxed."""
     root: Path = media_root

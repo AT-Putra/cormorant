@@ -547,16 +547,20 @@ class DownloadManager:
         average over the poll window, and two sources would fight.
         """
         promoted = False
+        claimed = False
         prev_size = 0
         prev_at = time.monotonic()
         while True:
             await asyncio.sleep(PART_PROBE_S)
-            if job.id in self._hook_seen:
-                return  # the engine speaks for itself
             part = await asyncio.to_thread(self._captured_part, job, baseline)
             if part is None:
                 continue
             self._job_parts[job.id] = part
+            if not claimed:
+                await self._claim_output(job, part)
+                claimed = True
+            if job.id in self._hook_seen:
+                return  # claimed; the engine reports its own numbers
             try:
                 size = await asyncio.to_thread(_size_of, part)
             except OSError:
@@ -579,6 +583,33 @@ class DownloadManager:
                     "speed": speed,
                 }
             )
+
+    async def _claim_output(self, job: models.DownloadJob, part: Path) -> None:
+        """Record where this job is writing, before it has finished writing.
+
+        recovery decides a .part is an orphan by checking it against the
+        output_path of every unsettled job -- and this column stayed NULL
+        until a job SUCCEEDED. So a job that was merely paused claimed
+        nothing, and the sweep collected its capture as abandoned, remuxed it
+        away and deleted the source; Resume then had nothing to continue
+        from. Caught with 1.9 GB of paused live captures one sweep away from
+        exactly that.
+
+        The recorder has claimed its path before the first byte for this same
+        reason since the sweep remuxed a file out from under its own engine.
+        Jobs never did. The claimed name is the .part without its suffix,
+        which is where yt-dlp renames it on success, so the early claim and
+        the eventual real path agree.
+        """
+        name = str(part)
+        final = name[: -len(".part")] if name.endswith(".part") else name
+        async with _db() as s:
+            await s.execute(
+                sa_update(models.DownloadJob)
+                .where(models.DownloadJob.id == job.id)
+                .values(output_path=final)
+            )
+            await s.commit()
 
     async def _consume_progress(self, job_id: int, q: pyqueue.Queue) -> None:
         """Drain hook payloads (marshaled via call_soon_threadsafe) until the

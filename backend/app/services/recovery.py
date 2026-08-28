@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 from app import models
 from app.services import events
+from app.services.downloader import TERMINAL
 from app.services.recorder import mp4_copy_args
 from app.services.ytdlp import _sanitize
 
@@ -41,7 +42,16 @@ def _db():
 
 
 def claimed_paths(job_rows, rec_rows) -> set[str]:
-    """Filesystem prefixes active jobs/recordings are writing right now."""
+    """Filesystem prefixes unsettled jobs/recordings still own.
+
+    Not just the ones writing this second. A paused job keeps its .part on
+    disk precisely so resume can continue it -- downloader says as much where
+    it pauses -- and a re-queued reconnect attempt resumes onto the same file.
+    Listing only queued/probing/downloading left both unclaimed, so the sweep
+    collected a paused capture as an orphan, remuxed it away and deleted the
+    source, and Resume then had nothing to continue from. Measured with 1.9 GB
+    of paused live captures sitting one sweep away from exactly that.
+    """
     claimed: set[str] = set()
     for j in job_rows:
         if j.output_path:
@@ -262,7 +272,7 @@ class RecoveryService:
                 (
                     await session.execute(
                         select(models.DownloadJob).where(
-                            models.DownloadJob.status.in_(("queued", "probing", "downloading"))
+                            models.DownloadJob.status.notin_(TERMINAL)
                         )
                     )
                 )
