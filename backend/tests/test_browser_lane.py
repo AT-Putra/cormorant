@@ -136,3 +136,41 @@ def test_a_browser_failure_falls_back_to_the_plain_fetch(monkeypatch):
     monkeypatch.setattr(type(ie), "_download_webpage", fake_download)
     assert ie._hevc_formats("https://www.tiktok.com/@x/live", "room-1") == []
     assert used.get("yes"), "a browserless run must still try the ordinary fetch"
+
+
+# ---- the lane must not care whether a loop is already turning -------------
+#
+# The capture subprocess is synchronous yt-dlp and probes arrive on a
+# to_thread worker, so both reach the driver with no running loop. A caller
+# that awaits the extractor directly does not, and a bare asyncio.run() raises
+# there -- which this module swallows into None, costing the ladder while
+# reporting nothing. That is the failure mode this whole feature exists to
+# stop, so it gets a test rather than a comment.
+
+
+async def _answer():
+    return "the page"
+
+
+def test_driver_runs_without_a_loop():
+    assert browser._run(_answer(), deadline=_soon()) == "the page"
+
+
+@pytest.mark.asyncio
+async def test_driver_survives_a_running_loop():
+    assert browser._run(_answer(), deadline=_soon()) == "the page"
+
+
+@pytest.mark.asyncio
+async def test_a_driver_failure_is_still_raised_from_a_running_loop():
+    async def boom():
+        raise RuntimeError("devtools went away")
+
+    with pytest.raises(RuntimeError, match="devtools went away"):
+        browser._run(boom(), deadline=_soon())
+
+
+def _soon() -> float:
+    import time
+
+    return time.monotonic() + 30

@@ -35,6 +35,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.request
 from http.cookiejar import MozillaCookieJar
@@ -172,6 +173,39 @@ async def _drive(ws_url: str, url: str, cookies: list[dict], deadline: float) ->
         return html
 
 
+def _run(coro, deadline: float):
+    """asyncio.run(), but survive being called from a thread already running a
+    loop.
+
+    The capture subprocess is plain synchronous yt-dlp, and the in-process
+    probes arrive on an asyncio.to_thread worker, so both reach here with no
+    loop and take the fast path. A caller that awaits the extractor directly
+    does not, and bare asyncio.run() raises there -- which this module would
+    then swallow into None, silently costing the ladder rather than reporting
+    anything. Handing the coroutine its own thread costs one thread and makes
+    the lane behave the same either way.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    box: dict = {}
+
+    def target():
+        try:
+            box["value"] = asyncio.run(coro)
+        except Exception as exc:  # mirrored out, never raised in the worker
+            box["error"] = exc
+
+    worker = threading.Thread(target=target, daemon=True)
+    worker.start()
+    worker.join(timeout=max(1.0, deadline - time.monotonic()))
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
 def fetch_page(
     url: str, cookiefile: str | Path | None = None, timeout: float = DEFAULT_TIMEOUT
 ) -> str | None:
@@ -216,7 +250,7 @@ def fetch_page(
         if not ws_url:
             log.warning("chrome devtools never came up within %.0fs", timeout)
             return None
-        return asyncio.run(_drive(ws_url, url, cdp_cookies(cookiefile), deadline))
+        return _run(_drive(ws_url, url, cdp_cookies(cookiefile), deadline), deadline)
     except Exception as exc:
         log.warning("browser fetch of %s failed: %s", url, exc)
         return None
