@@ -109,9 +109,27 @@ class TikTokLiveIE(_TikTokLiveIE):
                 'room/info already returned', video_id=room_id)
             return {}
 
+    def _browser_webpage(self, url):
+        """The /live page as a browser sees it, or None when that lane is off.
+
+        Off is the normal case: services/browser only answers when the capture
+        subprocess switched it on, so probes and the poller never spawn Chrome.
+        """
+        try:
+            from app.services import browser
+        except ImportError:
+            return None  # plugin loaded outside the app (bare yt-dlp CLI)
+        if not browser.enabled():
+            return None
+        self.to_screen('Reading the HEVC ladder through headless Chrome')
+        return browser.fetch_page(url, self.get_param('cookiefile'))
+
     def _hevc_formats(self, url, video_id):
         """HEVC ladder scraped off the /live page, or [] for any reason."""
-        webpage = self._download_webpage(
+        # The browser first, because while the WAF challenge stands it is the
+        # only client that gets a real page; _download_webpage then covers the
+        # lane being off, Chrome being absent, and the challenge being lifted.
+        webpage = self._browser_webpage(url) or self._download_webpage(
             url, video_id, note='Downloading webpage for the HEVC ladder',
             errnote='Unable to read the HEVC ladder', fatal=False)
         if not webpage:

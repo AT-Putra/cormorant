@@ -48,6 +48,36 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && ffmpeg -version | head -1
 
+# ---- Google Chrome, for the one page yt-dlp cannot read ----
+# TikTok serves www.tiktok.com HTML behind a JS WAF challenge (SlardarWAF), and
+# that page is the only place the HEVC ladder lives -- webcast/room/info
+# carries the H.264 one and nothing else. yt-dlp cannot run the challenge
+# script. Measured from the deploy host on live rooms: headless Chrome
+# returned the real ~447 KB page with hevcStreamData, and uhd_60 (1080p60) on
+# the rooms that publish it, while every yt-dlp request -- browser headers,
+# curl_cffi impersonation on each target it offers, valid cookies -- got the
+# 1.1 KB stub. Without this the ceiling is the H.264 720p tier.
+#
+# Only a starting capture pays for it (see app/services/browser.py); liveness
+# and room ids come from the JSON API, which is not challenged, so the poll
+# sweep never launches a browser.
+#
+# From Google's own apt repo rather than Debian's chromium: the measurement
+# above was made against Chrome, and a WAF that fingerprints browsers is the
+# last place to assume the two are interchangeable.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+    && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+        | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
+        > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends google-chrome-stable \
+    && apt-get purge -y gnupg curl \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/* \
+    && google-chrome --version
+
 # Non-root app user; owns config/data/media mount points
 RUN useradd --create-home --uid 1000 vduser
 

@@ -32,7 +32,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app import models
-from app.services import events, ytdlp
+from app.services import browser, events, ytdlp
 
 log = logging.getLogger(__name__)
 
@@ -294,6 +294,11 @@ async def _spawn_proc(cmd: list[str]) -> asyncio.subprocess.Process:
         *cmd,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
+        # The capture is the ONLY place the browser lane is worth its cost:
+        # one Chrome run per recording buys the HEVC ladder, where switching it
+        # on globally would spawn one per creator per poll sweep for a ladder
+        # nothing is about to download. services/browser explains the rest.
+        env={**os.environ, browser.ENABLE_ENV: "1"},
         **kwargs,
     )
 

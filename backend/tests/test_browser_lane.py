@@ -1,0 +1,138 @@
+"""The browser lane must stay off everywhere except a running capture.
+
+Chrome is the only client that clears TikTok's WAF challenge, and the challenged
+page is the only place the HEVC ladder lives -- so without this lane every
+capture is capped at the H.264 720p tier. But a browser launch is expensive
+enough that spawning one per creator per poll sweep would be worse than the
+ladder is worth, so the lane is opt-in and exactly one caller opts in.
+
+These pin the three ways that bargain silently breaks: the lane defaulting on,
+the recorder forgetting to switch it on for the capture subprocess, and a
+browser failure turning into a failed extraction instead of the H.264 result.
+"""
+
+import asyncio
+import os
+
+import pytest
+
+from app.services import browser, recorder
+
+
+def _live_ie_class():
+    from yt_dlp.globals import extractors
+
+    for cls in extractors.value.values():
+        if getattr(cls, "IE_NAME", None) == "tiktok:live":
+            return cls
+    pytest.fail("tiktok:live extractor missing from the registry")
+
+
+# ---- the switch ----------------------------------------------------------
+
+
+def test_lane_is_off_by_default(monkeypatch):
+    monkeypatch.delenv(browser.ENABLE_ENV, raising=False)
+    assert browser.enabled() is False
+
+
+def test_lane_is_on_only_for_the_exact_value(monkeypatch):
+    monkeypatch.setenv(browser.ENABLE_ENV, "1")
+    assert browser.enabled() is True
+    # anything else is a typo, not a request
+    monkeypatch.setenv(browser.ENABLE_ENV, "true")
+    assert browser.enabled() is False
+
+
+def test_capture_subprocess_switches_the_lane_on(monkeypatch):
+    """The recorder is the one caller allowed to turn this on."""
+    seen = {}
+
+    async def fake_exec(*cmd, **kwargs):
+        seen["env"] = kwargs.get("env")
+        return object()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    asyncio.run(recorder._spawn_proc(["echo", "hi"]))
+    assert seen["env"][browser.ENABLE_ENV] == "1"
+    # and it must not throw away the rest of the environment
+    assert "PATH" in seen["env"] or os.name != "posix"
+
+
+# ---- cookies -------------------------------------------------------------
+
+
+NETSCAPE = (
+    "# Netscape HTTP Cookie File\n"
+    ".tiktok.com\tTRUE\t/\tTRUE\t1900000000\tsessionid\tsecret-value\n"
+    ".tiktok.com\tTRUE\t/\tFALSE\t0\tttwid\tplain\n"
+)
+
+
+def test_cookies_become_a_cdp_payload(tmp_path):
+    f = tmp_path / "cookies.txt"
+    f.write_text(NETSCAPE, encoding="utf-8")
+    got = {c["name"]: c for c in browser.cdp_cookies(f)}
+    assert got["sessionid"]["value"] == "secret-value"
+    assert got["sessionid"]["domain"] == ".tiktok.com"
+    assert got["sessionid"]["secure"] is True
+    assert got["sessionid"]["expires"] == 1900000000.0
+    # a session cookie carries no expiry and must still survive the mapping
+    assert got["ttwid"]["secure"] is False
+    assert "expires" not in got["ttwid"]
+
+
+def test_no_cookiefile_is_not_an_error():
+    assert browser.cdp_cookies(None) == []
+
+
+def test_an_unreadable_jar_costs_cookies_not_the_capture(tmp_path):
+    f = tmp_path / "junk.txt"
+    f.write_text("this is not a cookie file", encoding="utf-8")
+    assert browser.cdp_cookies(f) == []
+
+
+# ---- failure is always the H.264 ladder, never an exception --------------
+
+
+def test_a_missing_browser_returns_none(monkeypatch):
+    monkeypatch.setattr(browser, "chrome_path", lambda: None)
+    assert browser.fetch_page("https://www.tiktok.com/@x/live") is None
+
+
+def test_browser_off_means_the_plugin_does_not_reach_for_chrome(monkeypatch):
+    monkeypatch.delenv(browser.ENABLE_ENV, raising=False)
+    monkeypatch.setattr(browser, "fetch_page", lambda *a, **k: pytest.fail(
+        "the lane is off; nothing may spawn a browser"))
+    ie = _live_ie_class()(__import__("yt_dlp").YoutubeDL(
+        {"quiet": True, "no_warnings": True}))
+    assert ie._browser_webpage("https://www.tiktok.com/@x/live") is None
+
+
+def test_the_browser_page_is_preferred_when_the_lane_is_on(monkeypatch):
+    """A browser page must be used INSTEAD of the challenged yt-dlp fetch."""
+    from yt_dlp import YoutubeDL
+
+    page = '<html>{"hevcStreamData":{}}SIGI_STATE</html>'
+    ie = _live_ie_class()(YoutubeDL({"quiet": True, "no_warnings": True}))
+    monkeypatch.setattr(type(ie), "_browser_webpage", lambda self, url: page)
+    monkeypatch.setattr(type(ie), "_download_webpage", lambda *a, **k: pytest.fail(
+        "the browser answered; the challenged fetch must not run"))
+    # no ladder in that stub, so [] -- the point is which fetch was used
+    assert ie._hevc_formats("https://www.tiktok.com/@x/live", "room-1") == []
+
+
+def test_a_browser_failure_falls_back_to_the_plain_fetch(monkeypatch):
+    from yt_dlp import YoutubeDL
+
+    ie = _live_ie_class()(YoutubeDL({"quiet": True, "no_warnings": True}))
+    monkeypatch.setattr(type(ie), "_browser_webpage", lambda self, url: None)
+    used = {}
+
+    def fake_download(self, url, *a, **k):
+        used["yes"] = True
+        return ""
+
+    monkeypatch.setattr(type(ie), "_download_webpage", fake_download)
+    assert ie._hevc_formats("https://www.tiktok.com/@x/live", "room-1") == []
+    assert used.get("yes"), "a browserless run must still try the ordinary fetch"
