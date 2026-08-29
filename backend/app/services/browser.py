@@ -57,6 +57,20 @@ DEFAULT_TIMEOUT = 45.0
 # What the challenge stub contains and a real page never does.
 _CHALLENGE_MARKER = "_wafchallengeid"
 
+# The blob this whole module exists to reach.
+_LADDER_MARKER = "hevcStreamData"
+
+# How long to keep looking for the ladder after the page is otherwise real.
+# Not optional: the first paint of a live room routinely carries roomId while
+# the ladder is still rendering, so returning on "looks real" brought back a
+# room WITHOUT its ladder that the very same page served a second later. Rooms
+# that genuinely publish no HEVC must not hang for it, hence a short bound.
+_LADDER_GRACE = 10.0
+
+# How often the DOM is re-read while waiting. Must stay well under the grace
+# above, or the grace expires after a single look and buys nothing.
+_POLL_INTERVAL = 0.5
+
 
 def enabled() -> bool:
     """Whether the browser lane is switched on for this process."""
@@ -159,6 +173,7 @@ async def _drive(ws_url: str, url: str, cookies: list[dict], deadline: float) ->
         # fires load too, then REPLACES itself once the script clears. What
         # matters is which document is there now, not that one finished.
         html = None
+        settled_at = None
         while time.monotonic() < deadline:
             got = await cmd("Runtime.evaluate", {
                 "expression": "document.documentElement.outerHTML",
@@ -168,8 +183,12 @@ async def _drive(ws_url: str, url: str, cookies: list[dict], deadline: float) ->
             if html and _CHALLENGE_MARKER not in html and (
                 "SIGI_STATE" in html or "roomId" in html
             ):
-                return html
-            await asyncio.sleep(1.0)
+                if _LADDER_MARKER in html:
+                    return html  # what we came for
+                settled_at = settled_at or time.monotonic()
+                if time.monotonic() - settled_at >= _LADDER_GRACE:
+                    return html  # a room that simply has no HEVC ladder
+            await asyncio.sleep(_POLL_INTERVAL)
         return html
 
 
@@ -250,7 +269,12 @@ def fetch_page(
         if not ws_url:
             log.warning("chrome devtools never came up within %.0fs", timeout)
             return None
-        return _run(_drive(ws_url, url, cdp_cookies(cookiefile), deadline), deadline)
+        html = _run(_drive(ws_url, url, cdp_cookies(cookiefile), deadline), deadline)
+        log.info(
+            "browser fetch of %s: %s bytes, ladder=%s",
+            url, len(html or ""), _LADDER_MARKER in (html or ""),
+        )
+        return html
     except Exception as exc:
         log.warning("browser fetch of %s failed: %s", url, exc)
         return None

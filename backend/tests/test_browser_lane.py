@@ -12,7 +12,9 @@ browser failure turning into a failed extraction instead of the H.264 result.
 """
 
 import asyncio
+import json
 import os
+import time
 
 import pytest
 
@@ -174,3 +176,94 @@ def _soon() -> float:
     import time
 
     return time.monotonic() + 30
+
+
+# ---- the ladder, not merely the first paint ------------------------------
+#
+# A live room's first paint routinely carries roomId while hevcStreamData is
+# still rendering. Returning on "looks like a real page" therefore brought back
+# a room WITHOUT its ladder that the same page served a second later -- caught
+# on prod, where one room came back with 12 HEVC formats and another with none
+# in 3s. So the driver keeps looking, bounded, and rooms that genuinely publish
+# no HEVC still come back rather than hanging.
+
+
+class _FakeWS:
+    """A websocket that replays a scripted sequence of DOM snapshots."""
+
+    def __init__(self, pages):
+        self.pages = list(pages)
+        self.methods = []
+        self._replies = []
+        self._last = ""
+
+    async def send(self, raw):
+        msg = json.loads(raw)
+        self.methods.append(msg["method"])
+        if msg["method"] == "Runtime.evaluate":
+            if self.pages:
+                self._last = self.pages.pop(0)
+            self._replies.append(
+                {"id": msg["id"], "result": {"result": {"value": self._last}}})
+        else:
+            self._replies.append({"id": msg["id"], "result": {}})
+
+    async def recv(self):
+        return json.dumps(self._replies.pop(0))
+
+
+def _fake_connect(ws):
+    class _CM:
+        async def __aenter__(self_inner):
+            return ws
+
+        async def __aexit__(self_inner, *exc):
+            return False
+
+    return lambda *a, **k: _CM()
+
+
+def _drive(pages, monkeypatch, grace=0.05):
+    import websockets
+
+    ws = _FakeWS(pages)
+    monkeypatch.setattr(websockets, "connect", _fake_connect(ws))
+    monkeypatch.setattr(browser, "_LADDER_GRACE", grace)
+    html = asyncio.run(browser._drive(
+        "ws://x", "https://www.tiktok.com/@x/live", [], time.monotonic() + 20))
+    return html, ws
+
+
+FIRST_PAINT = '<html>SIGI_STATE "roomId":"1"</html>'
+WITH_LADDER = '<html>SIGI_STATE "roomId":"1" hevcStreamData uhd_60</html>'
+
+
+def test_the_first_paint_does_not_win_over_the_ladder(monkeypatch):
+    # The grace has to outlast several polls to be a grace at all; production
+    # pairs a 10s window with a 0.5s poll, and the ratio is what matters here.
+    html, _ = _drive([FIRST_PAINT, FIRST_PAINT, WITH_LADDER], monkeypatch, grace=5.0)
+    assert "hevcStreamData" in html
+
+
+def test_the_grace_must_outlast_the_poll_interval():
+    """A grace shorter than one poll would return the first paint every time,
+    which is the bug this pair of tests exists to keep fixed."""
+    assert browser._LADDER_GRACE >= 10 * browser._POLL_INTERVAL
+
+
+def test_a_room_without_a_ladder_still_comes_back(monkeypatch):
+    html, _ = _drive([FIRST_PAINT], monkeypatch)
+    assert html == FIRST_PAINT
+
+
+def test_cookies_are_set_before_the_page_is_asked_for(monkeypatch):
+    """Order matters: cookies after navigate would authenticate nothing."""
+    import websockets
+
+    ws = _FakeWS([WITH_LADDER])
+    monkeypatch.setattr(websockets, "connect", _fake_connect(ws))
+    asyncio.run(browser._drive(
+        "ws://x", "https://www.tiktok.com/@x/live",
+        [{"name": "sessionid", "value": "v", "domain": ".tiktok.com"}],
+        time.monotonic() + 20))
+    assert ws.methods.index("Network.setCookies") < ws.methods.index("Page.navigate")
