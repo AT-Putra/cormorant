@@ -1,4 +1,4 @@
-"""Three repairs to yt-dlp's TikTok live extractor, all measured on live rooms.
+"""Four repairs to yt-dlp's TikTok live extractor, all measured on live rooms.
 
 1. A dead HLS fallback kills the whole extraction.
 
@@ -65,12 +65,37 @@
    it lives in that same HTML -- so rooms fall back to the H.264 ladder.
    _hevc_formats already degrades to [] on its own, so this needs no guard and
    recovers by itself when the challenge lifts.
+
+4. That rewrite renames the ordinary offline state.
+
+   _call_api has two ways to say "this room is not live": UserNotLive, "The
+   channel is not currently live", when it knows the handle, and a bare
+   ExtractorError, "This livestream has ended", when it does not -- the branch
+   is literally `elif not uploader`. Repair 3 hands it the share/live form,
+   which carries no handle, so every idle creator started reporting the second.
+
+   Nothing downstream reads status codes; both services match on the words.
+   poller._OFFLINE_RE knew only the first spelling, so from the day repair 3
+   shipped an offline creator published a watch.poll_error every sweep -- 186
+   rows in 26 hours, describing a room doing nothing wrong. downloader's
+   _STREAM_OVER_MARKERS had the same gap, which would have filed a capture the
+   host merely ended as failed instead of done.
+
+   So the handle's own wording is put back when we have a handle. Both
+   matchers learned "has ended" as well, for a share/live URL that arrives
+   with no handle to restore.
 """
 
 import json
 
 from yt_dlp.extractor.tiktok import TikTokLiveIE as _TikTokLiveIE
-from yt_dlp.utils import ExtractorError, int_or_none, traverse_obj, url_or_none
+from yt_dlp.utils import (
+    ExtractorError,
+    UserNotLive,
+    int_or_none,
+    traverse_obj,
+    url_or_none,
+)
 
 # The class MUST keep the upstream name: yt-dlp's plugin loader replaces a
 # built-in extractor by name, and a renamed subclass would register as an extra
@@ -81,6 +106,9 @@ class TikTokLiveIE(_TikTokLiveIE):
     _FALLBACK_EP = 'www.tiktok.com/api/live/detail'
     # The JSON twin of the WAF-challenged /@<uploader>/live page (repair 3).
     _ROOM_ID_EP = 'https://www.tiktok.com/api-live/user/room/'
+    # How _call_api words an idle room when it has no handle to name
+    # (repair 4).
+    _ENDED_MSG = 'This livestream has ended'
 
     # Where each HEVC tier sits on the SAME 0-9 scale the base extractor gets
     # from qualities(('SD1','ld','SD2','sd','HD1','hd','FULL_HD1','uhd',
@@ -187,7 +215,21 @@ class TikTokLiveIE(_TikTokLiveIE):
             if room_id:
                 url = f'https://m.tiktok.com/share/live/{room_id}'
 
-        info = super()._real_extract(url)
+        try:
+            info = super()._real_extract(url)
+        except ExtractorError as exc:
+            # Repair 4: the rewrite above costs the base extractor its handle,
+            # and _call_api describes an idle room differently without one --
+            # `elif not uploader` raises "This livestream has ended" where the
+            # handle would have got the usual UserNotLive, "The channel is not
+            # currently live". Same state, different words, and the words are
+            # what the app matches on: poller._OFFLINE_RE knew only the second
+            # spelling, so from the day the rewrite shipped every sweep of an
+            # offline creator published a watch.poll_error describing the
+            # normal state. Restore the wording the handle would have earned.
+            if uploader and self._ENDED_MSG in str(exc):
+                raise UserNotLive(video_id=uploader) from exc
+            raise
         if uploader:
             # The share/live form carries no handle, and the base extractor
             # only fills one in from the page it can no longer read.

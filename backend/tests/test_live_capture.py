@@ -25,6 +25,9 @@ class _Job:
 def test_stream_over_markers_classify_as_finished():
     assert _is_stream_over(Exception("ERROR: [BiliLive] 1542225: Streamer is not live"))
     assert _is_stream_over(Exception("The live event has ended"))
+    # TikTok's wording for a room reached with no handle, which is the
+    # share/live form our own plugin rewrites to.
+    assert _is_stream_over(Exception("This livestream has ended"))
     # A transport drop is not a clean end.
     assert not _is_stream_over(Exception("Connection reset by peer"))
 

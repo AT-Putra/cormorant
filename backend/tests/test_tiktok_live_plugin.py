@@ -15,7 +15,7 @@ in-process load — losing its --plugin-dirs flags.
 """
 
 import pytest
-from yt_dlp.utils import ExtractorError, UserNotLive
+from yt_dlp.utils import ExtractorError, UserNotLive, UserNotLive
 
 from app.services import recorder, ytdlp  # noqa: F401  (import installs plugins)
 
@@ -308,6 +308,56 @@ def test_unresolvable_room_id_still_lets_the_page_be_tried(monkeypatch):
     ie, seen = _ie_recording_the_base_url(monkeypatch, None)
     ie._real_extract("https://www.tiktok.com/@lalaaaey/live")
     assert seen["url"] == "https://www.tiktok.com/@lalaaaey/live"
+
+
+def _ie_whose_base_raises(monkeypatch, exc, room_id: str | None = "7679151507547179797"):
+    """Plugin extractor whose base _real_extract raises `exc`."""
+    from yt_dlp import YoutubeDL
+
+    active, builtin = _live_ie_class()
+
+    def fake_real_extract(self, url):
+        raise exc
+
+    monkeypatch.setattr(builtin, "_real_extract", fake_real_extract)
+    ie = active(YoutubeDL({"quiet": True, "no_warnings": True}))
+    monkeypatch.setattr(type(ie), "_room_id_from_api", lambda self, u: room_id)
+    monkeypatch.setattr(type(ie), "_hevc_formats", lambda self, url, vid: [])
+    return ie
+
+
+def test_idle_room_keeps_the_handles_wording(monkeypatch):
+    """The share/live rewrite must not rename the ordinary offline state.
+
+    _call_api says "This livestream has ended" only because the rewrite took
+    the handle away; with the handle it would raise UserNotLive. The whole app
+    matches offline on the words, so the rewrite silently turned every idle
+    tiktok sweep into a watch.poll_error.
+    """
+    ie = _ie_whose_base_raises(
+        monkeypatch, ExtractorError("This livestream has ended", expected=True))
+    with pytest.raises(UserNotLive) as caught:
+        ie._real_extract("https://www.tiktok.com/@lalaaaey/live")
+    assert "not currently live" in str(caught.value)
+
+
+def test_a_handleless_share_url_is_left_alone(monkeypatch):
+    """Nothing to restore the wording from, so the error passes through and
+    poller._OFFLINE_RE is what has to recognise it."""
+    ie = _ie_whose_base_raises(
+        monkeypatch, ExtractorError("This livestream has ended", expected=True),
+        room_id=None)
+    with pytest.raises(ExtractorError) as caught:
+        ie._real_extract("https://m.tiktok.com/share/live/7679151507547179797")
+    assert "This livestream has ended" in str(caught.value)
+
+
+def test_other_extractor_errors_are_not_reworded(monkeypatch):
+    ie = _ie_whose_base_raises(
+        monkeypatch, ExtractorError("Unable to download JSON metadata"))
+    with pytest.raises(ExtractorError) as caught:
+        ie._real_extract("https://www.tiktok.com/@lalaaaey/live")
+    assert "Unable to download JSON metadata" in str(caught.value)
 
 
 def test_hevc_ladder_still_reads_the_uploader_page(monkeypatch):

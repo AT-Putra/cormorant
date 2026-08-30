@@ -807,6 +807,10 @@ _STREAM_OVER_MARKERS = (
     "streamer is not live",
     "is not currently live",
     "live event has ended",
+    # TikTokLiveIE's wording for a room it reached without a handle -- the
+    # share/live form our own plugin rewrites to. Missing it filed a capture
+    # the host had simply ended as failed, discarding a complete .part.
+    "livestream has ended",
     "stream is offline",
     "room is offline",
 )

@@ -99,8 +99,17 @@ def room_url(watch: models.CreatorWatch) -> str:
 # creators on a 300s sweep buried the activity feed in errors describing the
 # normal state. downloader._STREAM_OVER_MARKERS spells the same phrase out in
 # full; keep both in step when a platform invents a new wording.
+#
+# "has ended" is that same lesson a second time. TikTokLiveIE._call_api words
+# an idle room two ways -- UserNotLive when it knows the handle, "This
+# livestream has ended" when it does not -- and our own room-id rewrite is what
+# takes the handle away, so the second spelling arrived here and buried the
+# feed again. The plugin now restores the first (repair 4 there); this stays as
+# the backstop for a room reached with no handle to restore, such as a
+# share/live URL stored as live_url by hand.
 _OFFLINE_RE = re.compile(
     r"not\s+(?:currently\s+)?live|is offline|no longer live"
+    r"|live(?:stream)?\s+(?:event\s+)?has\s+ended"
     r"|live event will begin|hasn.t started",
     re.IGNORECASE,
 )

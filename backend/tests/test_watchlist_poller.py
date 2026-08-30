@@ -468,6 +468,45 @@ async def test_idle_tiktok_room_is_not_a_poll_error(watch_env, monkeypatch):
     assert [e for e in errors if e.get("type") == "watch.poll_error"] == []
 
 
+async def test_ended_room_is_not_a_poll_error(watch_env, monkeypatch):
+    """The same lesson as above, in TikTok's other wording.
+
+    A room reached with no handle -- the share/live form -- is told "This
+    livestream has ended" rather than UserNotLive. Identical state, and the
+    plugin restores the handle's wording when it can, but a share/live URL
+    stored as live_url by hand has no handle to restore, so the sweep has to
+    read this one as idle too.
+    """
+    c, st = watch_env["client"], watch_env
+    c.post(
+        "/api/watchlist",
+        json={
+            "url": "https://www.tiktok.com/@someone",
+            "scope": "lives",
+            "live_url": "https://m.tiktok.com/share/live/7679151507547179797",
+        },
+    )
+
+    import app.services.poller as pl
+
+    def ended(url, cookiefile=None, *, extract_flat=False, playlist_items=None):
+        raise RuntimeError("ERROR: [tiktok:live] This livestream has ended")
+
+    monkeypatch.setattr(pl.ytdlp, "probe", ended)
+
+    import app.services.events as events
+
+    errors = []
+    events.subscribe(errors.append)
+    try:
+        await st["sweep"]()
+    finally:
+        events.unsubscribe(errors.append)
+
+    assert not st["recorder"].started
+    assert [e for e in errors if e.get("type") == "watch.poll_error"] == []
+
+
 async def test_room_probe_failure_still_reports(watch_env, monkeypatch):
     """A dead room URL is a real error and must not hide behind 'offline'."""
     c, st = watch_env["client"], watch_env
