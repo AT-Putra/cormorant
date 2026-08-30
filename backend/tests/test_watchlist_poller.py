@@ -401,6 +401,16 @@ async def test_live_room_url_is_polled_instead_of_the_listing(watch_env):
         assert rec.room_url == room
 
 
+def _async_recorder(sink):
+    """An async stand-in that records the argument it was called with."""
+
+    async def recorder(platform="tiktok"):
+        sink.append(platform)
+        return "ok"
+
+    return recorder
+
+
 async def test_offline_room_is_not_a_poll_error(watch_env, monkeypatch):
     """yt-dlp raises 'Streamer is not live' for an idle room — the normal
     state, not a broken sweep."""
@@ -505,6 +515,71 @@ async def test_ended_room_is_not_a_poll_error(watch_env, monkeypatch):
 
     assert not st["recorder"].started
     assert [e for e in errors if e.get("type") == "watch.poll_error"] == []
+
+
+async def test_the_sweep_checks_the_tiktok_cookie_jar(watch_env, monkeypatch):
+    """Cookie health rides the poll loop: it is already the thing that runs
+    whether or not anyone is live, and the extractor's session observations are
+    made on worker threads that cannot publish an event themselves."""
+    c, st = watch_env["client"], watch_env
+    _add_creator(c, url="https://www.tiktok.com/@someone", scope="lives")
+
+    import app.services.poller as pl
+
+    called = []
+    monkeypatch.setattr(
+        pl.credential_health, "sweep", _async_recorder(called))
+    monkeypatch.setattr(
+        pl.ytdlp, "probe",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline: not live")))
+
+    await st["sweep"]()
+    assert called == ["tiktok"]
+
+
+async def test_the_sweep_skips_the_jar_when_tiktok_is_not_watched(
+    watch_env, monkeypatch
+):
+    """"No tiktok cookies stored" is not news to someone who does not use it."""
+    c, st = watch_env["client"], watch_env
+    c.post(
+        "/api/watchlist",
+        json={"url": "https://space.bilibili.com/5500585", "scope": "lives"},
+    )
+
+    import app.services.poller as pl
+
+    called = []
+    monkeypatch.setattr(
+        pl.credential_health, "sweep", _async_recorder(called))
+    monkeypatch.setattr(pl.ytdlp, "probe", lambda *a, **k: {})
+
+    await st["sweep"]()
+    assert called == []
+
+
+async def test_a_failing_cookie_check_does_not_stop_the_sweep(
+    watch_env, monkeypatch
+):
+    c, st = watch_env["client"], watch_env
+    _add_creator(c, url="https://www.tiktok.com/@someone", scope="lives")
+
+    import app.services.poller as pl
+
+    async def boom(platform="tiktok"):
+        raise RuntimeError("db is gone")
+
+    probed = []
+
+    def probe(url, cookiefile=None, *, extract_flat=False, playlist_items=None):
+        probed.append(url)
+        raise RuntimeError("ERROR: [tiktok:live] someone: not currently live")
+
+    monkeypatch.setattr(pl.credential_health, "sweep", boom)
+    monkeypatch.setattr(pl.ytdlp, "probe", probe)
+
+    await st["sweep"]()
+    assert probed, "a broken health check must not cost the creators their sweep"
 
 
 async def test_room_probe_failure_still_reports(watch_env, monkeypatch):

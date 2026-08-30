@@ -255,6 +255,47 @@ async def test_creator_toggle_off_blocks_send(authed_client, crypto_tmp, fake_ht
     assert fake_httpx.calls == []
 
 
+# 4b. cookie health ---------------------------------------------------------------
+#
+# A dead jar is not tied to any creator -- it degrades every tiktok capture at
+# once -- so it carries no per-watch toggle and must reach the user even when
+# every creator has notifications turned off.
+
+
+async def test_stale_credentials_reach_the_channel(
+    authed_client, crypto_tmp, fake_httpx
+):
+    from tests.conftest import current_db
+
+    client, _ = authed_client
+    put_config(client)
+    await _seed_watch(current_db(), notify_golive=False)
+    events.publish(
+        {
+            "type": "credentials.stale",
+            "platform": "tiktok",
+            "state": "expired",
+            "detail": "the stored TikTok session cookie has expired (3d ago)",
+        }
+    )
+    await drain_glue()
+    assert len(fake_httpx.calls) == 1
+    body = json.dumps(fake_httpx.calls[0])
+    assert "expired" in body
+    assert "tiktok" in body
+
+
+async def test_recovered_credentials_do_not_page_anyone(
+    authed_client, crypto_tmp, fake_httpx
+):
+    """Good news belongs in the activity log, not in someone's phone."""
+    client, _ = authed_client
+    put_config(client)
+    events.publish({"type": "credentials.ok", "platform": "tiktok"})
+    await drain_glue()
+    assert fake_httpx.calls == []
+
+
 # 5. delete -----------------------------------------------------------------------
 
 

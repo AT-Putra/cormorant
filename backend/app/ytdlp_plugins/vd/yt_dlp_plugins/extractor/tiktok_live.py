@@ -1,4 +1,4 @@
-"""Four repairs to yt-dlp's TikTok live extractor, all measured on live rooms.
+"""Five repairs to yt-dlp's TikTok live extractor, all measured on live rooms.
 
 1. A dead HLS fallback kills the whole extraction.
 
@@ -84,6 +84,38 @@
    So the handle's own wording is put back when we have a handle. Both
    matchers learned "has ended" as well, for a share/live URL that arrives
    with no handle to restore.
+
+5. Chrome is the escalation, not the default (policy, not a yt-dlp bug).
+
+   Repair 2 asked the browser first and fell back to the plain fetch. That was
+   right while the WAF challenge stood and wrong the moment it lifted:
+   measured 2026-08-30 with the challenge down, a plain anonymous fetch
+   returned the complete ladder -- ld/sd/hd/hd_60/uhd_60/origin, uhd_60 being
+   the 1080p60 rung -- identical to the same fetch with cookies. Chrome added
+   nothing and cost up to 45s, and because the ladder is read before capture
+   begins, that is 45s of the live stream never written to disk.
+
+   So _ladder_page tries the plain fetch first and reads the answer to decide
+   what to do next:
+
+     plain page carrying hevcStreamData  -> use it, no browser
+     ~1.1 KB _wafchallengeid stub        -> Chrome (only it runs the script)
+     fetch failed outright               -> Chrome
+     real page, no hevcStreamData        -> Chrome, on a shorter budget
+
+   The last row is the age gate, and it is also the experiment. A gated room
+   is believed to withhold hevcStreamData from a non-browser client, but that
+   was never isolated -- the original comparison moved cookies and browser at
+   once. Here production runs the clean version by itself: plain+cookies
+   against Chrome+cookies, one variable. The to_screen line at the end of
+   _hevc_formats records which row fired and what it returned, so the answer
+   accumulates from ordinary captures instead of waiting on someone to catch a
+   gated room by hand.
+
+   While that page is being read anyway, _note_session reads whether TikTok
+   still considers us logged in (`webapp.app-context.user`) and hands it to
+   services/credential_health, which is what turns a silently-anonymous
+   capture into a warning the user can act on.
 """
 
 import json
@@ -96,6 +128,50 @@ from yt_dlp.utils import (
     traverse_obj,
     url_or_none,
 )
+
+# What the WAF stub contains and a real page never does, and the blob the
+# whole HEVC detour exists to reach. services/browser carries the same two
+# constants; they are duplicated rather than imported because this plugin has
+# to keep working under a bare yt-dlp CLI with no app package on the path.
+_CHALLENGE_MARKER = '_wafchallengeid'
+_LADDER_MARKER = 'hevcStreamData'
+
+# TikTok's OTHER way of refusing a non-browser client, and the one that cost an
+# hour before: a ~537 B "Site Maintenance" page reading "Oops! Something went
+# wrong" with an error code. It is a header fingerprint, not an outage -- the
+# same URL from real Chrome answers 241 KB in the same minute. Caught here
+# 2026-08-30 from a laptop while the deploy host was getting the real page.
+#
+# It has to be told apart from a real page, because "a real page with no
+# hevcStreamData" is the age-gate signal: letting a block wear that label would
+# both give Chrome the wrong budget and poison the record that is supposed to
+# settle whether the gate needs a browser at all.
+_MAINTENANCE_MARKER = 'Site Maintenance'
+
+# No block observed is anywhere near this big; the real page is ~241 KB.
+_STUB_MAX_BYTES = 5000
+
+# Chrome's budget for the 'no-ladder' escalation, well under services/browser's
+# 45s default. That default buys time to run a WAF challenge; here the page has
+# already rendered, so the only question left is whether a gate is hiding the
+# ladder -- and the wait is paid in unrecorded seconds of a live stream.
+_NO_LADDER_TIMEOUT = 15.0
+
+def _blocked_as(webpage):
+    """Which refusal this page is, or None when it is a page at all.
+
+    Both shapes are 200 OK -- neither can be told from a real answer by status
+    code, only by body. Classify by body, never by status; see
+    services/browser for the same rule stated from the browser's side.
+    """
+    if not webpage or len(webpage) > _STUB_MAX_BYTES:
+        return None
+    if _CHALLENGE_MARKER in webpage:
+        return 'challenge'
+    if _MAINTENANCE_MARKER in webpage:
+        return 'maintenance'
+    return None
+
 
 # The class MUST keep the upstream name: yt-dlp's plugin loader replaces a
 # built-in extractor by name, and a renamed subclass would register as an extra
@@ -137,7 +213,7 @@ class TikTokLiveIE(_TikTokLiveIE):
                 'room/info already returned', video_id=room_id)
             return {}
 
-    def _browser_webpage(self, url):
+    def _browser_webpage(self, url, timeout=None):
         """The /live page as a browser sees it, or None when that lane is off.
 
         Off is the normal case: services/browser only answers when the capture
@@ -150,16 +226,89 @@ class TikTokLiveIE(_TikTokLiveIE):
         if not browser.enabled():
             return None
         self.to_screen('Reading the HEVC ladder through headless Chrome')
-        return browser.fetch_page(url, self.get_param('cookiefile'))
+        kwargs = {'timeout': timeout} if timeout is not None else {}
+        return browser.fetch_page(url, self.get_param('cookiefile'), **kwargs)
+
+    def _note_session(self, webpage):
+        """Tell services/credential_health what this page said about our login.
+
+        Free: the page was fetched for the ladder either way. Only meaningful
+        when cookies were actually sent -- an anonymous fetch is logged out by
+        design and says nothing about the stored jar.
+        """
+        if not self.get_param('cookiefile'):
+            return
+        try:
+            from app.services import credential_health
+        except ImportError:
+            return  # bare yt-dlp CLI
+        state = self._session_state(webpage)
+        if state is not None:
+            credential_health.note_session('tiktok', state)
+
+    def _session_state(self, webpage):
+        """True/False for logged in, or None when the page cannot say.
+
+        `webapp.app-context.user` is present with uid and nickName for a good
+        session and the key is absent entirely for a rejected one. A refusal
+        stub or an unparseable page is not evidence either way -- reading one
+        as "logged out" would warn the user about perfectly good cookies every
+        time TikTok blocked us.
+        """
+        if not webpage or _blocked_as(webpage):
+            return None
+        try:
+            context = traverse_obj(
+                self._get_universal_data(webpage, 'session-check'),
+                ('webapp.app-context', {dict}))
+        except Exception:
+            return None
+        if context is None:
+            return None
+        return bool(traverse_obj(context, ('user', 'uid', {str}, filter)))
+
+    def _ladder_page(self, url, video_id):
+        """The /live page to read the ladder from, plus which route got it.
+
+        The plain fetch goes FIRST. When the WAF is down and the room is
+        ungated that one request already carries the ladder -- measured
+        2026-08-30, an anonymous fetch returned all six HEVC tiers including
+        uhd_60 -- so Chrome would buy nothing, and it is not free: the ladder
+        is read before capture starts, so every second it spends is a second
+        of the live stream not on disk.
+
+        Chrome is the escalation, for the three cases the plain fetch cannot
+        answer:
+
+          challenge   the WAF stub, ~1.1 KB. Only a browser runs the script.
+          unreadable  the fetch failed outright.
+          no-ladder   a real page carrying no hevcStreamData: either an
+                      age-gated room hiding it, or a room that publishes no
+                      HEVC at all. Chrome tells them apart, but only the first
+                      benefits, so it gets a shorter budget than a challenge.
+        """
+        webpage = self._download_webpage(
+            url, video_id, note='Downloading webpage for the HEVC ladder',
+            errnote='Unable to read the HEVC ladder', fatal=False)
+        self._note_session(webpage)
+        if webpage and _LADDER_MARKER in webpage:
+            return webpage, 'plain'
+
+        blocked = _blocked_as(webpage)
+        if not webpage:
+            via, timeout = 'unreadable', None
+        elif blocked:
+            via, timeout = blocked, None
+        else:
+            via, timeout = 'no-ladder', _NO_LADDER_TIMEOUT
+        browsed = self._browser_webpage(url, timeout)
+        if browsed:
+            self._note_session(browsed)
+        return (browsed or webpage), via
 
     def _hevc_formats(self, url, video_id):
         """HEVC ladder scraped off the /live page, or [] for any reason."""
-        # The browser first, because while the WAF challenge stands it is the
-        # only client that gets a real page; _download_webpage then covers the
-        # lane being off, Chrome being absent, and the challenge being lifted.
-        webpage = self._browser_webpage(url) or self._download_webpage(
-            url, video_id, note='Downloading webpage for the HEVC ladder',
-            errnote='Unable to read the HEVC ladder', fatal=False)
+        webpage, via = self._ladder_page(url, video_id)
         if not webpage:
             return []
 
@@ -192,6 +341,13 @@ class TikTokLiveIE(_TikTokLiveIE):
                     'resolution': params.get('resolution') or None,
                     'quality': self._HEVC_QUALITY.get(quality, 0),
                 })
+        # One line per capture naming the route and what it bought. This is the
+        # record that settles whether Chrome earns its 434 MB: a 'no-ladder'
+        # run that returns formats is a gate a browser opened, and one that
+        # returns none is a room with no HEVC to find.
+        self.to_screen(
+            f'HEVC ladder via {via}: {len(formats)} formats '
+            f'({", ".join(sorted(stream_data)) or "none"})')
         return formats
 
     def _room_id_from_api(self, uploader):

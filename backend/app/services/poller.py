@@ -13,7 +13,7 @@ import re
 from sqlalchemy import select
 
 from app import models
-from app.services import events, ytdlp
+from app.services import credential_health, events, ytdlp
 from app.services.settings_store import aget_settings
 
 log = logging.getLogger(__name__)
@@ -184,6 +184,18 @@ class PollerService:
                 .scalars()
                 .all()
             )
+        # Cookie health rides the sweep rather than a timer of its own: this is
+        # already the loop that runs whether or not anyone is live, and the
+        # extractor's session observations are made on worker threads that
+        # cannot publish (see services/credential_health). Only when tiktok is
+        # actually being watched -- "no tiktok cookies stored" is not news to
+        # someone who does not use tiktok.
+        if any(w.platform == "tiktok" for w in watches):
+            try:
+                await credential_health.sweep("tiktok")
+            except Exception:
+                log.exception("cookie health check failed")
+
         for w in watches:
             try:
                 await self.poll_creator(w)

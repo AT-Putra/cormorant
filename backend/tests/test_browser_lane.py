@@ -111,24 +111,117 @@ def test_browser_off_means_the_plugin_does_not_reach_for_chrome(monkeypatch):
     assert ie._browser_webpage("https://www.tiktok.com/@x/live") is None
 
 
-def test_the_browser_page_is_preferred_when_the_lane_is_on(monkeypatch):
-    """A browser page must be used INSTEAD of the challenged yt-dlp fetch."""
+# ---- Chrome is the escalation, not the default ---------------------------
+#
+# The lane used to ask the browser first. Measured 2026-08-30 with the WAF
+# challenge down, a plain anonymous fetch returned the whole ladder including
+# uhd_60, so that ordering spent up to 45s of Chrome -- 45s of a live stream
+# not yet being recorded -- for a page the ordinary fetch already had. The
+# plain fetch goes first now and Chrome answers only the three cases it cannot.
+
+
+def _ie_with_pages(monkeypatch, plain, browsed="<html>browser</html>"):
+    """Extractor whose two page sources are stubbed; records Chrome's budget."""
     from yt_dlp import YoutubeDL
 
-    page = '<html>{"hevcStreamData":{}}SIGI_STATE</html>'
     ie = _live_ie_class()(YoutubeDL({"quiet": True, "no_warnings": True}))
-    monkeypatch.setattr(type(ie), "_browser_webpage", lambda self, url: page)
-    monkeypatch.setattr(type(ie), "_download_webpage", lambda *a, **k: pytest.fail(
-        "the browser answered; the challenged fetch must not run"))
-    # no ladder in that stub, so [] -- the point is which fetch was used
-    assert ie._hevc_formats("https://www.tiktok.com/@x/live", "room-1") == []
+    seen = {"browser": False, "timeout": None}
+
+    def fake_browser(self, url, timeout=None):
+        seen["browser"] = True
+        seen["timeout"] = timeout
+        return browsed
+
+    monkeypatch.setattr(type(ie), "_browser_webpage", fake_browser)
+    monkeypatch.setattr(type(ie), "_download_webpage", lambda *a, **k: plain)
+    return ie, seen
+
+
+def test_a_plain_page_with_the_ladder_never_spawns_chrome(monkeypatch):
+    """The green row: WAF down, room ungated. Chrome buys nothing here."""
+    page = '<html>{"hevcStreamData":{}}SIGI_STATE</html>'
+    ie, seen = _ie_with_pages(monkeypatch, plain=page)
+    ie._hevc_formats("https://www.tiktok.com/@x/live", "room-1")
+    assert not seen["browser"], "the plain fetch already had the ladder"
+
+
+def test_the_waf_stub_escalates_to_chrome_on_the_full_budget(monkeypatch):
+    stub = '<html>_wafchallengeid Please wait...</html>'
+    ie, seen = _ie_with_pages(monkeypatch, plain=stub)
+    ie._hevc_formats("https://www.tiktok.com/@x/live", "room-1")
+    assert seen["browser"], "only a browser can run the challenge script"
+    assert seen["timeout"] is None, "a challenge needs the default budget"
+
+
+def test_the_maintenance_stub_escalates_on_the_full_budget(monkeypatch):
+    """TikTok's other refusal: ~537 B, "Site Maintenance", 200 OK. Caught in
+    the wild 2026-08-30 from a laptop while the deploy host was being served
+    the real 241 KB page in the same minute.
+
+    It must never be filed as 'no-ladder'. That label means "a real page that
+    withheld the ladder", which is the age-gate signal -- a block wearing it
+    would take the short budget and corrupt the record meant to settle whether
+    the gate needs a browser."""
+    stub = (
+        "<!doctype html><html><head><title>Site Maintenance</title></head>"
+        "<body><h1>Oops! Something went wrong</h1></body></html>"
+    )
+    ie, seen = _ie_with_pages(monkeypatch, plain=stub)
+    ie._hevc_formats("https://www.tiktok.com/@x/live", "room-1")
+    assert seen["browser"]
+    assert seen["timeout"] is None, "a block needs the full budget, not the gate's"
+
+
+def test_a_big_page_mentioning_maintenance_is_still_a_real_page(monkeypatch):
+    """The marker only counts in a stub-sized body, or a room whose title says
+    "Site Maintenance" would be misread as a block."""
+    from app.ytdlp_plugins.vd.yt_dlp_plugins.extractor import tiktok_live
+
+    page = "<html>SIGI_STATE Site Maintenance" + "x" * 6000 + "</html>"
+    assert tiktok_live._blocked_as(page) is None
+    ie, seen = _ie_with_pages(monkeypatch, plain=page)
+    ie._hevc_formats("https://www.tiktok.com/@x/live", "room-1")
+    assert seen["timeout"] == tiktok_live._NO_LADDER_TIMEOUT
+
+
+def test_a_refusal_stub_never_judges_the_cookie_jar():
+    """A block says nothing about the session; reading it as "logged out"
+    would warn about good cookies every time TikTok blocked us."""
+    from yt_dlp import YoutubeDL
+
+    ie = _live_ie_class()(YoutubeDL({"quiet": True, "no_warnings": True}))
+    for stub in (
+        "<html>_wafchallengeid Please wait...</html>",
+        "<html><title>Site Maintenance</title>Oops!</html>",
+    ):
+        assert ie._session_state(stub) is None
+
+
+def test_an_unreadable_page_escalates_to_chrome(monkeypatch):
+    ie, seen = _ie_with_pages(monkeypatch, plain=None)
+    ie._hevc_formats("https://www.tiktok.com/@x/live", "room-1")
+    assert seen["browser"]
+    assert seen["timeout"] is None
+
+
+def test_a_real_page_without_the_ladder_escalates_on_a_short_budget(monkeypatch):
+    """The age-gate row. Chrome gets a shorter budget because the page already
+    rendered, and because a room with no HEVC at all lands here too."""
+    from app.ytdlp_plugins.vd.yt_dlp_plugins.extractor import tiktok_live
+
+    ie, seen = _ie_with_pages(monkeypatch, plain="<html>SIGI_STATE real</html>")
+    ie._hevc_formats("https://www.tiktok.com/@x/live", "room-1")
+    assert seen["browser"]
+    assert seen["timeout"] == tiktok_live._NO_LADDER_TIMEOUT
 
 
 def test_a_browser_failure_falls_back_to_the_plain_fetch(monkeypatch):
+    """Chrome returning nothing must never cost the page we already had."""
     from yt_dlp import YoutubeDL
 
     ie = _live_ie_class()(YoutubeDL({"quiet": True, "no_warnings": True}))
-    monkeypatch.setattr(type(ie), "_browser_webpage", lambda self, url: None)
+    monkeypatch.setattr(
+        type(ie), "_browser_webpage", lambda self, url, timeout=None: None)
     used = {}
 
     def fake_download(self, url, *a, **k):

@@ -15,7 +15,7 @@ in-process load — losing its --plugin-dirs flags.
 """
 
 import pytest
-from yt_dlp.utils import ExtractorError, UserNotLive, UserNotLive
+from yt_dlp.utils import ExtractorError, UserNotLive
 
 from app.services import recorder, ytdlp  # noqa: F401  (import installs plugins)
 
@@ -308,6 +308,80 @@ def test_unresolvable_room_id_still_lets_the_page_be_tried(monkeypatch):
     ie, seen = _ie_recording_the_base_url(monkeypatch, None)
     ie._real_extract("https://www.tiktok.com/@lalaaaey/live")
     assert seen["url"] == "https://www.tiktok.com/@lalaaaey/live"
+
+
+# ---- the session signal the cookie warning is built on --------------------
+#
+# The /live page is fetched for the ladder either way, and it says whether
+# TikTok still knows us: `webapp.app-context.user` carries uid and nickName for
+# a live session and the key is absent entirely for a rejected one. Measured
+# 2026-08-30 on one room within the same minute -- anonymous 241,224 B with no
+# `user` key, the same fetch with cookies 247,079 B with one.
+
+
+def _universal_page(context):
+    return (
+        '<html><script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" '
+        'type="application/json">'
+        + _json.dumps({"__DEFAULT_SCOPE__": {"webapp.app-context": context}})
+        + "</script></html>"
+    )
+
+
+def _bare_ie():
+    from yt_dlp import YoutubeDL
+
+    active, _ = _live_ie_class()
+    return active(YoutubeDL({"quiet": True, "no_warnings": True}))
+
+
+def test_a_page_with_a_user_blob_reads_as_logged_in():
+    ie = _bare_ie()
+    page = _universal_page({"appId": 1180, "user": {"uid": "709155", "nickName": "k"}})
+    assert ie._session_state(page) is True
+
+
+def test_a_page_without_a_user_blob_reads_as_logged_out():
+    ie = _bare_ie()
+    assert ie._session_state(_universal_page({"appId": 1180})) is False
+
+
+@pytest.mark.parametrize("page", [
+    None,                                       # fetch failed
+    "",                                         # empty body
+    "<html>_wafchallengeid Please wait</html>",  # the WAF stub
+    "<html>no universal data here</html>",      # reshaped page
+])
+def test_a_page_that_cannot_say_reports_nothing(page):
+    """Absence of evidence must not be reported as a dead session -- that would
+    warn the user about their cookies every time the WAF came back."""
+    assert _bare_ie()._session_state(page) is None
+
+
+def test_an_anonymous_fetch_never_judges_the_stored_jar(monkeypatch):
+    """No cookiefile means logged-out by design; it says nothing about the jar."""
+    from app.services import credential_health
+
+    credential_health.reset()
+    ie = _bare_ie()  # no cookiefile in the params
+    ie._note_session(_universal_page({"appId": 1180}))
+    assert credential_health._take_observation("tiktok") is None
+
+
+def test_a_cookied_fetch_records_what_the_page_said(monkeypatch, tmp_path):
+    from yt_dlp import YoutubeDL
+
+    from app.services import credential_health
+
+    credential_health.reset()
+    jar = tmp_path / "cookies.txt"
+    jar.write_text("# Netscape HTTP Cookie File", encoding="utf-8")
+    active, _ = _live_ie_class()
+    ie = active(YoutubeDL(
+        {"quiet": True, "no_warnings": True, "cookiefile": str(jar)}))
+    ie._note_session(_universal_page({"appId": 1180}))
+    assert credential_health._take_observation("tiktok") is False
+    credential_health.reset()
 
 
 def _ie_whose_base_raises(monkeypatch, exc, room_id: str | None = "7679151507547179797"):

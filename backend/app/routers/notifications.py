@@ -36,6 +36,9 @@ _EVENT_MAP = {
     "recording.failed": "recording_finished",
     "recording.interrupted": "recording_finished",
     "job.failed": "download_failed",
+    # Not tied to any creator, so it carries no per-watch toggle: a dead cookie
+    # jar degrades every tiktok capture at once, and only the user can fix it.
+    "credentials.stale": "credentials_stale",
 }
 
 
@@ -189,6 +192,17 @@ async def _toggles(session: AsyncSession, platform: str, creator: str) -> dict:
 
 
 async def _build_context(etype: str, event: dict) -> dict | None:
+    if etype == "credentials_stale":
+        platform = event.get("platform", "?")
+        return {
+            "platform": platform,
+            "title": f"{platform} login needs attention",
+            "message": (
+                f"[{platform}] {event.get('detail') or event.get('state')}\n"
+                "Re-export the cookies in Settings -> Credentials; until then "
+                "captures fall back to whatever an anonymous client is offered."
+            ),
+        }
     db = _lazy_db()
     async with db.async_session() as s:
         if etype == "golive":
