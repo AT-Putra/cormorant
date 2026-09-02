@@ -60,8 +60,25 @@ _PROFILE_TEMPLATES = {
 # that currently dies on "Unable to extract secondary user ID", and even when it
 # answers it describes a video listing that carries no live flag at all. Pointed
 # at /live instead, the same probe reaches tiktok:live and reports is_live.
+#
+# instagram is here for the same reason, one step further along: its profile
+# probe routes to yt-dlp's instagram:user, which ships _WORKING = False and
+# still scrapes a `sharedData` blob Instagram dropped from its HTML years ago,
+# so a live check on the profile never had a chance of reporting is_live.
+# /<handle>/live reaches the instagram:live extractor this repo adds
+# (ytdlp_plugins/.../instagram_live.py), which answers is_live or raises the
+# ordinary UserNotLive.
+#
+# Unlike tiktok, that extractor refuses outright when no sessionid is stored
+# rather than reporting "not live" — deliberately: _OFFLINE_RE will not match
+# "you need to log in", so an instagram watch with no credentials publishes a
+# poll_error every sweep instead of quietly reporting an idle creator. That is
+# the honest reading. Instagram serves no live route at all to a signed-out
+# caller, so "offline" would be a guess dressed as an observation, and the
+# thing the user has to act on is the missing cookie.
 _LIVE_TEMPLATES = {
     "tiktok": "https://www.tiktok.com/@{id}/live",
+    "instagram": "https://www.instagram.com/{id}/live",
 }
 
 
@@ -85,8 +102,7 @@ def live_url(watch: models.CreatorWatch) -> str | None:
 
 def room_url(watch: models.CreatorWatch) -> str:
     """Where a capture would point: the creator's live room when one is known,
-    else their profile (douyin/instagram serve the stream off the profile URL
-    itself)."""
+    else their profile (douyin serves the stream off the profile URL itself)."""
     return live_url(watch) or profile_url(watch)
 
 

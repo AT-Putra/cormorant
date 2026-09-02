@@ -53,8 +53,10 @@ def detect_platform(url: str) -> str | None:
 
 
 # Path prefixes that are Instagram *content*, never a profile handle.
+# "live" is here for the bare instagram.com/live/ form; the handle-carrying
+# /<user>/live/ shape is read below, where the handle is the first segment.
 _IG_RESERVED = frozenset(
-    {"p", "reel", "reels", "tv", "stories", "explore", "accounts", "direct"}
+    {"p", "reel", "reels", "tv", "stories", "explore", "accounts", "direct", "live"}
 )
 
 
@@ -82,7 +84,18 @@ def creator_id_from_url(url: str) -> str | None:
         and len(seg) > 2
     ):
         return seg[2]
-    if host.endswith("instagram.com") and len(seg) == 1 and seg[0] not in _IG_RESERVED:
+    # /<handle>/ and /<handle>/live/ both state the handle, and both rebuild
+    # the same profile page — which is the contract this function has with
+    # poller._PROFILE_TEMPLATES. Reading the live form matters because it is
+    # the URL a person copies out of a running broadcast, and without it a
+    # watch added from one falls through to the probe's uploader_id: Instagram's
+    # numeric account id, which formats into instagram.com/<pk>/ and is nobody's
+    # profile.
+    if (
+        host.endswith("instagram.com")
+        and seg[0] not in _IG_RESERVED
+        and (len(seg) == 1 or (len(seg) == 2 and seg[1] == "live"))
+    ):
         return seg[0]
     return None
 
