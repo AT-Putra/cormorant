@@ -30,11 +30,19 @@ FROM python:3.14-slim AS runtime
 # version pin has to name the autobuild), the filename (which embeds ffmpeg's
 # own git describe), and the sha256 BtbN publishes alongside it. To bump:
 # read the new tag, filename and hash out of
-# https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest and its
-# checksums.sha256 asset. A wrong hash fails the build rather than shipping.
-ARG FFMPEG_RELEASE=autobuild-2026-08-26-13-06
-ARG FFMPEG_BUILD=ffmpeg-n9.0.1-8-g16dfae5c88-linux64-gpl-9.0
-ARG FFMPEG_SHA256=7648eac8acab5c1be8d064c1055cc0429663a7462b4ddcd591134ae4a3a6110e
+# https://api.github.com/repos/BtbN/FFmpeg-Builds/releases?per_page=5 and
+# that release's checksums.sha256 asset. A wrong hash fails the build rather
+# than shipping.
+#
+# The pin rots: BtbN deletes dated autobuilds after a few weeks, so a curl 404
+# here means the release is gone, not that the URL is wrong -- re-pin to the
+# newest autobuild that ships a linux64-gpl-9.0 tarball. Prefer one whose
+# filename is a bare release (ffmpeg-n9.0.2-...) over a master snapshot
+# (ffmpeg-n9.0.1-84-g...): both are 9.0 branch, but the release is what
+# ffmpeg.org tagged.
+ARG FFMPEG_RELEASE=autobuild-2026-09-19-13-11
+ARG FFMPEG_BUILD=ffmpeg-n9.0.2-linux64-gpl-9.0
+ARG FFMPEG_SHA256=c67af56466837059601a1abd22109b7b771eeea137c9ff4b1db0bde66192dbc6
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
     && curl -fsSL -o /tmp/ffmpeg.tar.xz \
