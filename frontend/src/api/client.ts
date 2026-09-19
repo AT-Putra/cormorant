@@ -246,15 +246,67 @@ export const api = {
   },
 };
 
-export function openEventSocket(onEvent: (e: Record<string, unknown>) => void): WebSocket {
+export interface EventSocket {
+  close(): void;
+}
+
+// The server's own close code for "signed out / session rotated" (ws.py). A
+// socket closed that way stays closed; the app shell handles the redirect.
+const CLOSE_UNAUTHENTICATED = 4401;
+// First retry is quick because the common cause is a deploy: the container
+// restart drops every socket and the app is back within seconds. Doubling up
+// to the cap covers a proxy or server that is really gone.
+const RECONNECT_MIN_MS = 1000;
+const RECONNECT_MAX_MS = 15000;
+
+// A socket that reopens itself. The bytes and rate of a live capture travel
+// ONLY over this socket -- the 5s REST refresh carries status, not progress --
+// so a socket that died at a deploy left the Queue reading "0 MB" for a
+// capture that was writing 430 KB/s, until the page was reloaded by hand.
+// `onReconnect` fires after every reopen (never the first open) so a caller
+// can refetch what it missed while the socket was down.
+export function openEventSocket(
+  onEvent: (e: Record<string, unknown>) => void,
+  onReconnect?: () => void,
+): EventSocket {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(`${proto}//${location.host}/api/ws`);
-  ws.onmessage = (m) => {
-    try {
-      onEvent(JSON.parse(m.data));
-    } catch {
-      /* non-json */
-    }
+  const url = `${proto}//${location.host}/api/ws`;
+  let ws: WebSocket | null = null;
+  let closedByCaller = false;
+  let everOpened = false;
+  let delay = RECONNECT_MIN_MS;
+  let retry: number | null = null;
+
+  function connect() {
+    retry = null;
+    ws = new WebSocket(url);
+    ws.onopen = () => {
+      delay = RECONNECT_MIN_MS;
+      if (everOpened) onReconnect?.();
+      everOpened = true;
+    };
+    ws.onmessage = (m) => {
+      try {
+        onEvent(JSON.parse(m.data));
+      } catch {
+        /* non-json */
+      }
+    };
+    // onclose follows onerror as well, so one handler covers both.
+    ws.onclose = (ev) => {
+      ws = null;
+      if (closedByCaller || ev.code === CLOSE_UNAUTHENTICATED) return;
+      retry = window.setTimeout(connect, delay);
+      delay = Math.min(delay * 2, RECONNECT_MAX_MS);
+    };
+  }
+
+  connect();
+  return {
+    close() {
+      closedByCaller = true;
+      if (retry !== null) window.clearTimeout(retry);
+      ws?.close();
+    },
   };
-  return ws;
 }

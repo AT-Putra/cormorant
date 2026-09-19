@@ -3,6 +3,7 @@ import {
   api,
   openEventSocket,
   type DownloadJob,
+  type EventSocket,
   type ProbeResult,
   type QualityOption,
   type Recording,
@@ -186,7 +187,7 @@ export default function Queue() {
   const [confirming, setConfirming] = useState<DownloadJob | null>(null);
   // Per-job live tick from the event bus; not persisted server-side.
   const [live, setLive] = useState<Record<number, { speed: number | null; bytes: number | null }>>({});
-  const wsRef = useRef<WebSocket | null>(null);
+  const wsRef = useRef<EventSocket | null>(null);
   const [recordings, setRecordings] = useState<Recording[]>([]);
   // Re-render on a timer so elapsed time advances between events; a capture
   // can run for hours without publishing anything at all.
@@ -223,7 +224,9 @@ export default function Queue() {
         return; // progress ticks are frequent; don't refetch the whole list
       }
       refresh();
-    });
+    // A reopened socket has missed whatever happened while it was down --
+    // a job that finished, a capture that started -- so refetch on reconnect.
+    }, () => void refresh());
     wsRef.current = ws;
     // 5s: fast enough that a stalled capture is obvious, slow enough that an
     // idle page is not polling for nothing.
