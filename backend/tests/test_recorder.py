@@ -427,6 +427,79 @@ async def test_shutdown_does_not_start_the_fallback_engine(sup, db, monkeypatch)
     assert (await fetch(db, rid)).status == "recording"
 
 
+async def test_shutdown_on_the_last_engine_registers_what_it_captured(
+    sup, db, monkeypatch
+):
+    """A restart that lands on the fallback engine must not file the capture
+    as 'failed' with no path.
+
+    The shutdown check sits at the top of the engine loop, so it only runs on
+    the way to a NEXT engine. yt-dlp had already failed, streamlink was the
+    last entry, and when the deploy killed it the loop just ended and fell
+    into the 'failed' branch -- while the remux it had completed sat on disk
+    unregistered, and the orphan sweep collects only .part names. Measured on
+    a deploy: 337 MB invisible in the library.
+    """
+    out = pin_out(monkeypatch, "restart.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    first = FakeProc(exit_code=1)                  # yt-dlp fails outright
+    second = FakeProc(exit_code=-9, delay=999)     # streamlink, until killed
+    spawned = script_spawns(monkeypatch, [first, second])
+    real_spawn = rec_mod.asyncio.create_subprocess_exec
+
+    async def spawn_touch(*cmd, **kwargs):
+        if cmd[0] == "streamlink":
+            out.with_suffix(".flv").write_bytes(b"1" * 4096)
+        return await real_spawn(*cmd, **kwargs)
+
+    monkeypatch.setattr(rec_mod.asyncio, "create_subprocess_exec", spawn_touch)
+
+    rid = await make_recording(db, origin="watchlist")()
+    task = sup.start_recording(rid)
+    await asyncio.sleep(0.05)  # let supervise reach the second engine
+
+    def fake_kill(pid):
+        second._delay = 0.0
+
+    monkeypatch.setattr(rec_mod, "_kill_tree", fake_kill)
+    await asyncio.wait_for(sup.shutdown(), timeout=10)
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+
+    assert [c[0] for c in spawned] == [rec_mod.sys.executable, "streamlink"]
+    rec = await fetch(db, rid)
+    assert rec.status == "interrupted"
+    assert rec.error == "interrupted by app restart"
+    assert rec.output_path == str(out)
+    assert rec.ended_at is not None
+    assert out.exists() and not out.with_suffix(".flv").exists()
+    async with db.async_session() as s:
+        items = (await s.execute(select(models.LibraryItem))).scalars().all()
+    assert [i.file_path for i in items] == [str(out)]
+
+
+async def test_shutdown_on_the_last_engine_with_nothing_captured(sup, db, monkeypatch):
+    """Same restart, but the engine never wrote a byte: still 'interrupted',
+    since a restart is what happened, with nothing to register."""
+    pin_out(monkeypatch, "restart-empty.mp4")
+    first = FakeProc(exit_code=1)
+    second = FakeProc(exit_code=-9, delay=999)
+    script_spawns(monkeypatch, [first, second])
+
+    rid = await make_recording(db, origin="watchlist")()
+    task = sup.start_recording(rid)
+    await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(rec_mod, "_kill_tree", lambda pid: setattr(second, "_delay", 0.0))
+    await asyncio.wait_for(sup.shutdown(), timeout=10)
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+
+    rec = await fetch(db, rid)
+    assert rec.status == "interrupted"
+    assert rec.output_path is None
+    async with db.async_session() as s:
+        assert (await s.execute(select(models.LibraryItem))).scalars().all() == []
+
+
 def test_captured_file_picks_the_bigger_of_the_two_names(tmp_path):
     """The engine chain can leave one file under each name.
 

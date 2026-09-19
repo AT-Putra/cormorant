@@ -521,6 +521,18 @@ class RecorderSupervisor:
             await self._finalize(recording_id, intended, final_path, None)
         elif rc == 0 and captured:
             await self._finalize(recording_id, "finished", final_path, None)
+        elif self._shutting_down:
+            # The app is going down and the engine it killed was the LAST in
+            # the chain, so the loop simply ended: the return above only runs
+            # on the way to a next engine. This used to fall through to
+            # 'failed' with no path -- "engine (streamlink) exited with code
+            # -9" -- while the remux it had just finished sat on disk unseen,
+            # 337 MB on one deploy, and the orphan sweep collects only .part
+            # names so nothing would ever pick it up. What the engine wrote
+            # is a recording someone wants to watch, the same as a user stop.
+            await self._finalize(
+                recording_id, "interrupted", final_path, "interrupted by app restart"
+            )
         else:
             await self._finalize(
                 recording_id, "failed", None, err or "engine produced no output"
@@ -552,7 +564,7 @@ class RecorderSupervisor:
                 return
             rec.status = status
             rec.error = error
-            if status in ("finished", "ended"):
+            if status in ("finished", "ended", "interrupted"):
                 rec.ended_at = models.utcnow()
             if out_path is not None:
                 rec.output_path = str(out_path)
@@ -561,7 +573,10 @@ class RecorderSupervisor:
                 # sweep would not collect a running capture. Nothing came of
                 # it, so stop pointing at a file that does not exist.
                 rec.output_path = None
-            if status in ("finished", "ended") and out_path is not None and out_path.exists():
+            # 'interrupted' arrives here only from a teardown that finished its
+            # remux; reconcile_on_boot writes that status through
+            # _patch_status and never brings a file with it.
+            if status in ("finished", "ended", "interrupted") and out_path is not None and out_path.exists():
                 session.add(
                     models.LibraryItem(
                         file_path=str(out_path),
