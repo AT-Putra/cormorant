@@ -9,6 +9,10 @@ const TYPE_COLORS: Record<string, string> = {
   finished: "text-emerald-400",
   interrupted: "text-yellow-300",
   "notification.suppressed": "text-ink-faint/70",
+  // A dead cookie jar degrades every capture on that platform until the user
+  // re-exports, so it reads as a failure, and the all-clear as a finish.
+  "credentials.stale": "text-bad",
+  "credentials.ok": "text-emerald-400",
 };
 
 export default function ActivityLog() {

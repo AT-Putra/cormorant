@@ -21,6 +21,20 @@ Three ways a jar stops working, and they need three different detectors:
   same fetch with cookies 247,079 B carrying uid and nickName. The signal is
   free -- no request exists for the sake of this check.
 
+Bilibili needs a fourth detector, because its **rejected** state is the
+common one and nothing observes it for free. SESSDATA is rotated whenever
+bilibili refreshes the session, which revokes every copy exported earlier
+while the expiry in the file still reads years away -- so the offline check
+says "ok" about a jar the site no longer honours. And yt-dlp treats the mere
+presence of SESSDATA as logged in, so the capture does not fall back to
+anonymous, it runs at whatever tier a logged-out client is offered: a 年度大会员
+credential the save-time check had passed eight days earlier recorded at 超清
+(qn 250) while nav answered 账号未登录 (measured 2026-09-19, prod). The only
+way to know is to ask: one GET of the nav endpoint with the jar, the same
+question the credentials router asks at save time. That is a probe, not an
+observation, so sweep() makes it itself -- only for a jar the offline check
+passed, only for platforms named in PROBES.
+
 Two structural constraints shape the rest:
 
 The plugin runs inside `asyncio.to_thread`, and services/activity's mirror
@@ -37,6 +51,7 @@ buried the activity feed; see poller._OFFLINE_RE for that lesson. One event
 when the jar goes bad, one when it comes back, silence in between.
 """
 
+import asyncio
 import logging
 import threading
 import time
@@ -45,20 +60,82 @@ from app.services import events
 
 log = logging.getLogger(__name__)
 
-# TikTok only, by request. Adding a platform means naming its session cookies
-# here -- the rest of the module is platform-agnostic.
-SESSION_COOKIES = {"tiktok": ("sessionid", "sessionid_ss", "sid_tt", "sid_guard")}
+# Adding a platform means naming its session cookies here; the offline half of
+# the module is platform-agnostic. A platform whose site says nothing about the
+# session for free also wants an entry in PROBES below.
+SESSION_COOKIES = {
+    "tiktok": ("sessionid", "sessionid_ss", "sid_tt", "sid_guard"),
+    "bilibili": ("SESSDATA",),
+}
 
 # How long before expiry to start warning. A week is enough notice to re-export
 # without racing a live stream.
 EXPIRY_WARNING_S = 7 * 24 * 3600
 
+_NAMES = {"tiktok": "TikTok", "bilibili": "bilibili"}
+
 _ADVICE = {
-    "missing": "no TikTok session cookie is stored -- captures are anonymous",
-    "expired": "the stored TikTok session cookie has expired",
-    "rejected": "TikTok served a logged-out page despite the stored cookies",
-    "expiring": "the stored TikTok session cookie expires soon",
+    "missing": "no {name} session cookie is stored -- captures are anonymous",
+    "expired": "the stored {name} session cookie has expired",
+    "rejected": "{name} says the stored session is logged out -- re-export the cookies",
+    "expiring": "the stored {name} session cookie expires soon",
 }
+
+
+def _advice(state: str, platform: str) -> str:
+    return _ADVICE[state].format(name=_NAMES.get(platform, platform))
+
+
+# ---- active probes -----------------------------------------------------------
+
+BILIBILI_NAV = "https://api.bilibili.com/x/web-interface/nav"
+
+
+def bilibili_nav(cookiefile: str) -> dict:
+    """The nav payload for a jar, through yt-dlp's own networking so the
+    answer describes the session the extractor will present. Raises on a
+    network failure; the caller decides what silence means."""
+    from app.services import ytdlp
+
+    return ytdlp.fetch_json(
+        BILIBILI_NAV, cookiefile, headers={"Referer": "https://www.bilibili.com/"}
+    )
+
+
+def _bilibili_logged_in(cookiefile: str) -> bool | None:
+    """Whether bilibili still honours the jar. None is "no verdict" -- a
+    network error or an answer without isLogin -- and is never read as
+    logged out, since a blip must not announce a dead credential."""
+    try:
+        payload = bilibili_nav(cookiefile)
+    except Exception as exc:
+        log.warning("bilibili session probe failed: %s", exc)
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict) or "isLogin" not in data:
+        return None
+    return bool(data["isLogin"])
+
+
+# platform -> sync callable(cookiefile path) -> logged_in | None. Run off the
+# loop by sweep(); its answer outranks a recorded observation, being newer.
+PROBES = {"bilibili": _bilibili_logged_in}
+
+
+async def _probe(platform: str) -> bool | None:
+    probe = PROBES.get(platform)
+    if probe is None:
+        return None
+    # Lazy: the router imports this package, so a top-level import is a cycle.
+    from app.routers.credentials import aget_cookiefile
+
+    cookiefile = await aget_cookiefile(platform)
+    if cookiefile is None:
+        return None
+    try:
+        return await asyncio.to_thread(probe, str(cookiefile))
+    finally:
+        cookiefile.unlink(missing_ok=True)
 
 _lock = threading.Lock()
 _observed: dict[str, bool] = {}   # platform -> logged_in, written off-loop
@@ -115,19 +192,21 @@ def inspect(
     """Offline verdict on a jar's text: (state, human detail)."""
     now = time.time() if now is None else now
     if not text or not text.strip():
-        return "missing", _ADVICE["missing"]
+        return "missing", _advice("missing", platform)
     expiry = parse_expiry(text, platform)
     if expiry is None:
-        return "missing", _ADVICE["missing"]
+        return "missing", _advice("missing", platform)
     left = expiry - now
     if left <= 0:
-        return "expired", f"{_ADVICE['expired']} ({int(-left // 86400)}d ago)"
+        return "expired", f"{_advice('expired', platform)} ({int(-left // 86400)}d ago)"
     if left <= EXPIRY_WARNING_S:
-        return "expiring", f"{_ADVICE['expiring']} (in {int(left // 3600)}h)"
+        return "expiring", f"{_advice('expiring', platform)} (in {int(left // 3600)}h)"
     return "ok", ""
 
 
-def combine(offline: tuple[str, str], logged_in: bool | None) -> tuple[str, str]:
+def combine(
+    offline: tuple[str, str], logged_in: bool | None, platform: str = "tiktok"
+) -> tuple[str, str]:
     """Fold an observed session state into the offline verdict.
 
     Only "ok" can become "rejected": when the jar is already missing or expired
@@ -136,7 +215,7 @@ def combine(offline: tuple[str, str], logged_in: bool | None) -> tuple[str, str]
     """
     state, detail = offline
     if logged_in is False and state == "ok":
-        return "rejected", _ADVICE["rejected"]
+        return "rejected", _advice("rejected", platform)
     if logged_in is True and state == "rejected":
         return "ok", ""
     return state, detail
@@ -195,10 +274,18 @@ async def _jar_text(platform: str) -> str | None:
 
 
 async def sweep(platform: str = "tiktok") -> str:
-    """One health check: offline verdict folded with any observation."""
-    state, detail = combine(
-        inspect(await _jar_text(platform), platform), _take_observation(platform)
-    )
+    """One health check: offline verdict, folded with what the site said --
+    an observation a fetch left behind, or the probe's answer when the
+    platform has one and the jar is worth the round trip."""
+    offline = inspect(await _jar_text(platform), platform)
+    observed = _take_observation(platform)
+    if offline[0] == "ok":
+        # A missing or expired jar already has its verdict; asking the site
+        # about it would only spend a request to be told the same thing.
+        probed = await _probe(platform)
+        if probed is not None:
+            observed = probed
+    state, detail = combine(offline, observed, platform)
     report(platform, state, detail)
     return state
 

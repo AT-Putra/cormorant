@@ -157,3 +157,104 @@ def test_healthy_at_boot_says_nothing():
     finally:
         done()
     assert seen == []
+
+
+# ---- bilibili: the probe -----------------------------------------------------
+
+
+def _bili_jar(expiry):
+    return f"#HttpOnly_.bilibili.com\tTRUE\t/\tTRUE\t{int(expiry)}\tSESSDATA\tabc%2Cdef\n"
+
+
+def test_bilibili_session_cookie_is_sessdata():
+    assert ch.inspect(_bili_jar(time.time() + 90 * 86400), "bilibili")[0] == "ok"
+    state, detail = ch.inspect(_jar(time.time() + 90 * 86400), "bilibili")
+    assert state == "missing"
+    assert "bilibili" in detail
+
+
+def test_bilibili_logged_in_reads_islogin_and_nothing_else(monkeypatch):
+    answers = iter([
+        {"code": 0, "data": {"isLogin": True, "uname": "x"}},
+        {"code": -101, "message": "账号未登录", "data": {"isLogin": False}},
+        {"code": 0, "data": {}},          # no verdict: the key is not there
+        "not even a dict",                # no verdict
+    ])
+    monkeypatch.setattr(ch, "bilibili_nav", lambda cookiefile: next(answers))
+    assert ch._bilibili_logged_in("jar") is True
+    assert ch._bilibili_logged_in("jar") is False
+    assert ch._bilibili_logged_in("jar") is None
+    assert ch._bilibili_logged_in("jar") is None
+
+
+def test_a_network_error_is_no_verdict(monkeypatch):
+    def boom(cookiefile):
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(ch, "bilibili_nav", boom)
+    assert ch._bilibili_logged_in("jar") is None
+
+
+def _probe_env(monkeypatch, jar, verdict):
+    """A sweep whose jar and probe answer are scripted; records the events."""
+    seen = []
+    monkeypatch.setattr(ch.events, "publish", seen.append)
+
+    async def jar_text(platform):
+        return jar
+
+    monkeypatch.setattr(ch, "_jar_text", jar_text)
+
+    probed = []
+
+    async def probe(platform):
+        probed.append(platform)
+        return verdict
+
+    monkeypatch.setattr(ch, "_probe", probe)
+    return seen, probed
+
+
+async def test_a_rotated_sessdata_is_reported_as_rejected(monkeypatch):
+    """Unexpired in the file, refused by the site: the state the offline check
+    cannot see and the one that actually happens."""
+    seen, probed = _probe_env(monkeypatch, _bili_jar(time.time() + 300 * 86400), False)
+    assert await ch.sweep("bilibili") == "rejected"
+    assert probed == ["bilibili"]
+    assert [e["type"] for e in seen] == ["credentials.stale"]
+    assert seen[0]["platform"] == "bilibili"
+    assert "logged out" in seen[0]["detail"]
+
+
+async def test_a_probe_with_no_verdict_leaves_the_offline_answer(monkeypatch):
+    seen, _ = _probe_env(monkeypatch, _bili_jar(time.time() + 300 * 86400), None)
+    assert await ch.sweep("bilibili") == "ok"
+    assert seen == []
+
+
+async def test_an_expired_jar_is_not_probed(monkeypatch):
+    """The site would only repeat what the file already says."""
+    seen, probed = _probe_env(monkeypatch, _bili_jar(time.time() - 86400), False)
+    assert await ch.sweep("bilibili") == "expired"
+    assert probed == []
+
+
+async def test_a_fresh_export_clears_the_rejection(monkeypatch):
+    seen, _ = _probe_env(monkeypatch, _bili_jar(time.time() + 300 * 86400), False)
+    await ch.sweep("bilibili")
+    _probe_env(monkeypatch, _bili_jar(time.time() + 300 * 86400), True)[0]
+    # events.publish is re-patched by the second env; read the state instead
+    assert await ch.sweep("bilibili") == "ok"
+
+
+async def test_tiktok_has_no_probe_and_keeps_its_observation(monkeypatch):
+    seen = []
+    monkeypatch.setattr(ch.events, "publish", seen.append)
+
+    async def jar_text(platform):
+        return _jar(time.time() + 90 * 86400)
+
+    monkeypatch.setattr(ch, "_jar_text", jar_text)
+    ch.note_session("tiktok", False)
+    assert await ch.sweep("tiktok") == "rejected"
+    assert "TikTok" in seen[0]["detail"]

@@ -537,15 +537,38 @@ async def test_the_sweep_checks_the_tiktok_cookie_jar(watch_env, monkeypatch):
     assert called == ["tiktok"]
 
 
-async def test_the_sweep_skips_the_jar_when_tiktok_is_not_watched(
+async def test_the_sweep_checks_the_bilibili_cookie_jar_too(watch_env, monkeypatch):
+    """Every watched platform with a detector gets its jar checked, once each.
+
+    Bilibili is the one that needed it most: a rotated SESSDATA passes every
+    offline check and yt-dlp still calls it logged in, so a premium account
+    recorded at 超清 for days with nothing in the UI to say why.
+    """
+    c, st = watch_env["client"], watch_env
+    _add_creator(c, url="https://space.bilibili.com/5500585", scope="lives")
+    _add_creator(c, url="https://space.bilibili.com/5500586", scope="lives")
+    _add_creator(c, url="https://www.tiktok.com/@someone", scope="lives")
+
+    import app.services.poller as pl
+
+    called = []
+    monkeypatch.setattr(
+        pl.credential_health, "sweep", _async_recorder(called))
+    monkeypatch.setattr(
+        pl.ytdlp, "probe",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline: not live")))
+
+    await st["sweep"]()
+    assert called == ["bilibili", "tiktok"]
+
+
+async def test_the_sweep_skips_the_jar_when_the_platform_is_not_watched(
     watch_env, monkeypatch
 ):
-    """"No tiktok cookies stored" is not news to someone who does not use it."""
+    """"No tiktok cookies stored" is not news to someone who does not use it,
+    and a platform with no detector at all is never asked."""
     c, st = watch_env["client"], watch_env
-    c.post(
-        "/api/watchlist",
-        json={"url": "https://space.bilibili.com/5500585", "scope": "lives"},
-    )
+    _add_creator(c, url="https://www.douyin.com/user/MS4wLjABAAAA", scope="lives")
 
     import app.services.poller as pl
 

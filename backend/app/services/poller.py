@@ -203,14 +203,16 @@ class PollerService:
         # Cookie health rides the sweep rather than a timer of its own: this is
         # already the loop that runs whether or not anyone is live, and the
         # extractor's session observations are made on worker threads that
-        # cannot publish (see services/credential_health). Only when tiktok is
+        # cannot publish (see services/credential_health). Only for platforms
         # actually being watched -- "no tiktok cookies stored" is not news to
         # someone who does not use tiktok.
-        if any(w.platform == "tiktok" for w in watches):
+        for platform in sorted({w.platform for w in watches}):
+            if platform not in credential_health.SESSION_COOKIES:
+                continue
             try:
-                await credential_health.sweep("tiktok")
+                await credential_health.sweep(platform)
             except Exception:
-                log.exception("cookie health check failed")
+                log.exception("%s cookie health check failed", platform)
 
         for w in watches:
             try:

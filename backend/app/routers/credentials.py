@@ -243,9 +243,6 @@ def _is_auth_error(exc: Exception) -> bool:
 # bilibili's own "who am I" endpoint. Answers the question a probe of public
 # content structurally cannot: not "did the site respond" but "is this session
 # logged in, and as whom".
-_BILIBILI_NAV = "https://api.bilibili.com/x/web-interface/nav"
-
-
 def _check_bilibili_auth(cookiefile: str) -> str:
     """Verify a bilibili session server-side; return a label for the account.
 
@@ -263,10 +260,12 @@ def _check_bilibili_auth(cookiefile: str) -> str:
     has to be caught at save time, which is the only moment a human is
     watching.
     """
+    # The same GET the poll-time health probe makes (services/credential_health),
+    # so save-time and sweep-time can never disagree about what "logged in" is.
+    from app.services.credential_health import bilibili_nav
+
     try:
-        payload = ytdlp.fetch_json(
-            _BILIBILI_NAV, cookiefile, headers={"Referer": "https://www.bilibili.com/"}
-        )
+        payload = bilibili_nav(cookiefile)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Probe network error: {exc}") from exc
 

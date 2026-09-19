@@ -509,7 +509,9 @@ def test_bilibili_auth_check_replaces_the_probe(authed_client, crypto_tmp, monke
     assert "bilibili" not in cred_mod._PROBE_URLS
     assert len(nav.calls) == 1
     call = nav.calls[0]
-    assert call["url"] == cred_mod._BILIBILI_NAV
+    from app.services.credential_health import BILIBILI_NAV
+
+    assert call["url"] == BILIBILI_NAV
     # The whole point is asking AS the user: a check that forgot the cookies
     # would answer "not logged in" for a perfectly good export.
     assert call["cookiefile"] is not None
