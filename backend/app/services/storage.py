@@ -69,6 +69,21 @@ async def floor_pct() -> float:
         return float((await aget_settings(s)).space_floor_pct)
 
 
+async def room_for_copy(size: int) -> bool:
+    """Whether `size` more bytes still leave free space at or above the floor.
+
+    A remux writes a whole second copy of the capture before the first is
+    deleted. For a capture stopped AT the floor, or a four-hour one stopped
+    near it, that copy is what fills the volume -- and a full volume is where
+    the database and the log stop writing. Unknown usage answers yes: the
+    remux then fails on its own terms, as it did before this check.
+    """
+    usage = disk_usage()
+    if usage is None:
+        return True
+    return usage.free - size >= usage.total * await floor_pct() / 100
+
+
 @dataclass(frozen=True)
 class SpaceStatus:
     usage: DiskUsage

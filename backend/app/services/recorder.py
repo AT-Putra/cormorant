@@ -356,7 +356,7 @@ class RecorderSupervisor:
         # recording_id -> why a stop was ordered, persisted as the row's error
         # (a floor stop has to say so, or it reads as the host ending).
         self._reasons: dict[int, str] = {}
-        self._watchdog: asyncio.Task | None = None
+        self._watchdogs: list[asyncio.Task] = []
         self.watchdog_s = WATCHDOG_S
 
     # ---- lifecycle -------------------------------------------------------
@@ -426,22 +426,25 @@ class RecorderSupervisor:
         at boot every leftover 'recording' row is unsupervised, and those are
         reconcile's to probe and retrigger, not the watchdog's to write off.
         """
-        if self._watchdog is None or self._watchdog.done():
-            self._watchdog = asyncio.create_task(self._watch())
+        if any(not t.done() for t in self._watchdogs):
+            return
+        # Two loops, not one: a reap can spend minutes remuxing a lost
+        # capture, and a single loop sat in that remux while a running
+        # capture wrote on past the floor.
+        self._watchdogs = [
+            asyncio.create_task(self._every(self.enforce_floor, "space floor check")),
+            asyncio.create_task(self._every(self.reap_orphans, "orphan reap")),
+        ]
 
-    async def _watch(self) -> None:
+    async def _every(self, check, what: str) -> None:
         while True:
             await asyncio.sleep(self.watchdog_s)
             if self._shutting_down:
                 return  # engines are being killed; there is nothing to guard
             try:
-                await self.enforce_floor()
+                await check()
             except Exception:
-                log.exception("space floor check failed")
-            try:
-                await self.reap_orphans()
-            except Exception:
-                log.exception("orphan reap failed")
+                log.exception("%s failed", what)
 
     async def start(self) -> None:
         """Arm the supervisor for a fresh process life.
@@ -464,10 +467,10 @@ class RecorderSupervisor:
     async def shutdown(self) -> None:
         """Kill every registered engine child (main.py lifespan teardown)."""
         self._shutting_down = True
-        if self._watchdog is not None:
-            self._watchdog.cancel()
-            await asyncio.gather(self._watchdog, return_exceptions=True)
-            self._watchdog = None
+        for t in self._watchdogs:
+            t.cancel()
+        await asyncio.gather(*self._watchdogs, return_exceptions=True)
+        self._watchdogs = []
         for rid, (proc, _task) in list(self._registry.items()):
             if proc is not None and getattr(proc, "returncode", 0) is None:
                 try:
@@ -608,7 +611,22 @@ class RecorderSupervisor:
         A failed remux keeps the FLV and registers that: a file the user has
         to work to open beats a recording that silently is not there. Either
         way the .part suffix goes -- see drop_part_suffix.
+
+        So does a remux there is no room for. It needs a second copy of the
+        capture on disk, and a capture stopped at the floor is by definition
+        one the disk cannot hold twice.
         """
+        try:
+            size = capture.stat().st_size
+        except OSError:
+            size = 0
+        if not await storage.room_for_copy(size):
+            log.warning(
+                "keeping %s as FLV: remuxing %d bytes would go below the space floor",
+                capture.name,
+                size,
+            )
+            return drop_part_suffix(capture)
         if await remux_to_mp4(capture, dst):
             capture.unlink(missing_ok=True)
             return dst

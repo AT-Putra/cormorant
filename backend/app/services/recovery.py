@@ -21,7 +21,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app import models
-from app.services import events
+from app.services import events, storage
 from app.services.downloader import TERMINAL
 from app.services.recorder import mp4_copy_args
 from app.services.ytdlp import _sanitize
@@ -139,6 +139,15 @@ async def remux_and_register(part: Path) -> models.LibraryItem | None:
             final.name, part.name,
         )
         final.unlink(missing_ok=True)
+
+    # The copy is written in full before the source goes, and a copy that
+    # takes the volume below the floor takes the database and the log with
+    # it. Unlike a finalizing capture this can simply wait: the .part stays
+    # an orphan and the next sweep asks again. Quietly -- one activity row
+    # per orphan per sweep, onto a disk that is short, helps nobody.
+    if not await storage.room_for_copy(part.stat().st_size):
+        log.warning("recovery of %s waits for room above the space floor", part.name)
+        return None
 
     # ponytail: blocking ffmpeg via to_thread instead of exec — output is
     # unbounded but bounded by disk; switch to create_subprocess_exec with

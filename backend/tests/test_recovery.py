@@ -1,6 +1,7 @@
 """Orphan-recovery: claim filtering, candidates, remux+register flow."""
 
 import asyncio
+import importlib
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,7 +46,19 @@ def test_recovered_name():
 def media_root(tmp_path, monkeypatch):
     monkeypatch.setattr(rec, "_media_root", lambda: tmp_path)
     monkeypatch.setattr(rec, "ffmpeg", "echo-ffmpeg")
-    return tmp_path
+    # A database of its own. remux_and_register writes LibraryItems and reads
+    # the space floor, and these tests leaned on whichever database an earlier
+    # module had left initialised: run alone against an empty DATA_DIR, three
+    # of them failed on "no such table" before a line of recovery ran.
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    import app.config as config
+    import app.db as db_mod
+
+    importlib.reload(config)
+    importlib.reload(db_mod)
+    asyncio.run(db_mod.init_db())
+    yield tmp_path
+    asyncio.run(db_mod.engine.dispose())
 
 
 def _seed_recording(status: str, output_path: str | None):
@@ -114,6 +127,33 @@ def test_recovery_announces_a_failed_remux(media_root, monkeypatch):
     assert [e["type"] for e in published] == ["recording.recover_failed"]
     assert published[0]["ffmpeg_rc"] == 1
     assert part.exists()  # source kept for the next sweep
+
+
+def test_recovery_waits_when_the_copy_would_breach_the_floor(media_root, monkeypatch):
+    """The remux writes a whole second copy before the source goes; at the
+    floor that copy is what fills the volume. The orphan can wait."""
+    from app.services import storage
+
+    root: Path = media_root
+    d = root / "tiktok" / "someone"
+    d.mkdir(parents=True)
+    part = d / "live_z.flv.part"
+    part.write_bytes(bytes(64))
+    monkeypatch.setattr(
+        storage,
+        "disk_usage",
+        lambda path=None: storage.DiskUsage(total=100 * 1024**3, free=4 * 1024**3),
+    )
+    ran: list = []
+    monkeypatch.setattr(rec.subprocess, "run", lambda cmd, **kw: ran.append(cmd))
+    published: list[dict] = []
+    monkeypatch.setattr(rec.events, "publish", published.append)
+
+    assert asyncio.run(rec.remux_and_register(part)) is None
+
+    assert ran == []  # ffmpeg never started
+    assert published == []  # and no activity row per sweep while short
+    assert part.exists()  # still an orphan for the next sweep
 
 
 def _ok_ffmpeg(cmd, **kw):

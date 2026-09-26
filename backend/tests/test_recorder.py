@@ -1095,7 +1095,7 @@ async def test_shutdown_during_a_floor_stop_does_not_hang(sup, db, monkeypatch):
 
     await asyncio.wait_for(sup.shutdown(), timeout=5)
 
-    assert sup._watchdog is None
+    assert sup._watchdogs == []
 
 
 async def test_one_failed_floor_stop_does_not_spare_the_rest(sup, db, monkeypatch):
@@ -1175,13 +1175,70 @@ async def test_a_floor_of_zero_never_stops_a_capture(sup, db, monkeypatch):
 async def test_shutdown_cancels_the_watchdog(sup, db):
     sup.watchdog_s = 3600
     await sup.start_watchdog()
-    watchdog = sup._watchdog
-    assert watchdog is not None and not watchdog.done()
+    loops = list(sup._watchdogs)
+    assert len(loops) == 2 and not any(t.done() for t in loops)
+    await sup.start_watchdog()  # idempotent while running
+    assert sup._watchdogs == loops
 
     await sup.shutdown()
 
-    assert watchdog.cancelled()
-    assert sup._watchdog is None
+    assert all(t.cancelled() for t in loops)
+    assert sup._watchdogs == []
+
+
+async def test_a_slow_reap_does_not_hold_up_the_floor(sup, db, monkeypatch):
+    """One loop ran the floor check and then the reap; a reap remuxing a
+    multi-GB orphan kept a running capture writing past the floor for as
+    long as that remux took."""
+    proc = stoppable(monkeypatch, "slowreap.mp4")
+    rid = await make_recording(db)()
+    task = sup.start_recording(rid)
+    await engine_up(sup, rid)
+    reaping = asyncio.Event()
+
+    async def slow_reap():
+        reaping.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(sup, "reap_orphans", slow_reap)
+    sup.watchdog_s = 0.01
+    await sup.start_watchdog()
+    await asyncio.wait_for(reaping.wait(), timeout=5)  # the reap is under way
+
+    low_disk(monkeypatch, free_pct=4.0)
+    for _ in range(300):
+        if proc.signals:
+            break
+        await asyncio.sleep(0.01)
+
+    assert proc.signals == [signal.SIGINT]
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+
+
+async def test_a_capture_the_disk_cannot_hold_twice_is_kept_as_flv(sup, db, monkeypatch):
+    """Remuxing writes a second copy before the first goes. At the floor
+    that copy is what would fill the volume, so the FLV is registered as is."""
+    remuxed: list[Path] = []
+
+    async def spy_remux(src, dst):
+        remuxed.append(src)
+        return False
+
+    monkeypatch.setattr(rec_mod, "remux_to_mp4", spy_remux)
+    capture = _media_root() / "tiktok" / "c1" / "live_20260926_120000.flv"
+    capture.parent.mkdir(parents=True)
+    part = capture.with_name(capture.name + ".part")
+    part.write_bytes(b"f" * 4096)
+    rid = await make_recording(db, output_path=str(capture))()
+    low_disk(monkeypatch, free_pct=4.0)  # below the 10% floor already
+
+    assert await sup.reap_orphan(rid) is True
+
+    assert remuxed == []  # never attempted
+    rec = await fetch(db, rid)
+    assert rec.status == "interrupted"
+    assert rec.output_path == str(capture)  # the FLV, .part suffix dropped
+    assert capture.read_bytes() == b"f" * 4096
 
 
 # ---- reconcile_on_boot -----------------------------------------------------------
