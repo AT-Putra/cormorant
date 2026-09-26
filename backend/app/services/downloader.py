@@ -18,18 +18,16 @@ from sqlalchemy import select
 from sqlalchemy import update as sa_update
 
 from app import models
-from app.services import events, ytdlp
+from app.services import events, storage, ytdlp
 from app.services.settings_store import decode_setting
+from app.services.storage import RESUME_MARGIN_PCT
 
 log = logging.getLogger(__name__)
 
 DEFAULT_CONCURRENCY = 3
 # Reconnect budget for a live capture that drops mid-stream.
 LIVE_MAX_RETRIES = 20
-DEFAULT_SPACE_FLOOR_PCT = 5.0
 WATCHER_INTERVAL_S = 30.0
-# Hysteresis margin (percentage points) before auto-resume, per plan step 15.
-RESUME_MARGIN_PCT = 2.0
 # How often the first-bytes watchdog looks for the engine's own .part.
 PART_PROBE_S = 2.0
 
@@ -46,13 +44,8 @@ def _db():
 
 def free_space_pct(path: Path) -> float:
     """Free % on the volume holding `path` (media volume, not root fs)."""
-    try:
-        import psutil
-
-        usage = psutil.disk_usage(str(path))
-        return usage.free / usage.total * 100 if usage.total else 0.0
-    except OSError:
-        return 0.0
+    usage = storage.disk_usage(path)
+    return usage.free_pct if usage else 0.0
 
 
 def _size_of(path: Path) -> int:
@@ -198,14 +191,9 @@ class DownloadManager:
                 return DEFAULT_CONCURRENCY
 
     async def get_floor(self) -> float:
-        async with _db() as s:
-            row = await s.get(models.AppSetting, "space_floor_pct")
-            if row is None:
-                return DEFAULT_SPACE_FLOOR_PCT
-            try:
-                return float(decode_setting(row.value))
-            except (TypeError, ValueError):
-                return DEFAULT_SPACE_FLOOR_PCT
+        # Through the settings store, so an unsaved floor means the 10% the
+        # settings page shows -- this used to fall back to a 5% of its own.
+        return await storage.floor_pct()
 
     # ---- public API ------------------------------------------------------
 

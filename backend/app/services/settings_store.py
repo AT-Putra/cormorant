@@ -109,8 +109,10 @@ def _validate(s: dict) -> None:
         errors.append("concurrency_cap must be 1..8")
     if s["poll_interval_seconds"] < 60:
         errors.append("poll_interval_seconds must be >= 60")
-    if not (0 <= s["space_floor_pct"] <= 50):
-        errors.append("space_floor_pct must be 0..50")
+    # A whole number: aget_settings keeps only values of the default's type,
+    # so a saved 7.5 was answered "Saved." and then read back as 10.
+    if not isinstance(s["space_floor_pct"], int) or not (0 <= s["space_floor_pct"] <= 50):
+        errors.append("space_floor_pct must be a whole number 0..50")
     if not s["folder_template"]:
         errors.append("folder_template must not be empty")
     else:

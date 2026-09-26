@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.models import LiveRecording
+from app.services import storage
 from app.services.recorder import begin_recording, recorder
 from app.util.platform import detect_platform
 
@@ -63,6 +64,21 @@ def _size_of(path: str | None) -> int | None:
     return None
 
 
+async def _require_room_to_start() -> None:
+    """507 below the floor + margin, where the poller would not start one
+    either -- and a capture started anyway is what the floor watchdog stops."""
+    status = await storage.space_status()
+    if status is not None and not status.room_to_start:
+        raise HTTPException(
+            507,
+            detail=(
+                f"Not enough free space to record: {status.usage.free_pct:.1f}% free, "
+                f"a new recording needs {status.start_pct:g}% "
+                f"(the {status.floor_pct:g}% space floor + {storage.RESUME_MARGIN_PCT:g})"
+            ),
+        )
+
+
 @router.post("/api/downloads/record-live", status_code=201)
 async def record_live(
     body: RecordRequest, session: AsyncSession = Depends(get_session)
@@ -70,6 +86,7 @@ async def record_live(
     platform = detect_platform(body.url)
     if not platform:
         raise HTTPException(400, detail="Unsupported URL")
+    await _require_room_to_start()
     rec = await begin_recording(body.url, platform, creator="", origin="manual")
     return _rec_out(rec)
 
@@ -104,6 +121,7 @@ async def retry_recording(
     rec = await _get_rec_or_404(recording_id, session)
     if rec.status != "interrupted":
         raise HTTPException(409, detail=f"Cannot retry recording in status '{rec.status}'")
+    await _require_room_to_start()
     new = await begin_recording(rec.room_url, rec.platform, rec.creator, origin=rec.origin)
     return {"retried_from": rec.id, **{
         "id": new.id,

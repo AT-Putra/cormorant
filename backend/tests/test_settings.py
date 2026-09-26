@@ -37,6 +37,7 @@ def test_put_invalid_rejected(authed_client):
         {"concurrency_cap": 99},
         {"poll_interval_seconds": 10},
         {"space_floor_pct": 90},
+        {"space_floor_pct": 7.5},  # was "Saved." and then read back as 10
         {"folder_template": ""},
         {"bogus_key": 1},
         {"default_quality": "1080"},   # missing the 'p'
@@ -283,11 +284,16 @@ async def test_concurrency_cap_setting_reaches_the_queue(authed_client):
 
 
 async def test_space_floor_setting_reaches_the_gate(authed_client):
-    from app.services.downloader import DownloadManager, DEFAULT_SPACE_FLOOR_PCT
+    from app.services.downloader import DownloadManager
 
     client, _ = authed_client
+    # Never saved: the gate enforces what the settings page shows. It used to
+    # fall back to a 5% of its own while the page said 10%.
+    shown = client.get("/api/settings").json()["space_floor_pct"]
+    assert await DownloadManager().get_floor() == float(shown)
+
     target = 25
-    assert target != DEFAULT_SPACE_FLOOR_PCT
+    assert target != shown
     assert client.put("/api/settings", json={"space_floor_pct": target}).status_code == 200
 
     assert await DownloadManager().get_floor() == float(target)

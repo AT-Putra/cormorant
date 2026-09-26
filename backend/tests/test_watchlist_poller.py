@@ -368,6 +368,46 @@ async def test_poller_lives_transition_creates_recording(watch_env):
     assert st["recorder"].started == [rid]
 
 
+async def test_no_room_to_record_skips_the_live_and_says_so(watch_env, monkeypatch):
+    from app.services import events, storage
+
+    c, st = watch_env["client"], watch_env
+    row = _add_creator(c, scope="lives")
+    st["set_probe"](
+        f"https://space.bilibili.com/{row['creator_id']}",
+        {"_type": "playlist", "id": "room-1", "is_live": True, "entries": []},
+    )
+    # 11% free against the default 10% floor: inside the resume margin.
+    monkeypatch.setattr(
+        storage,
+        "disk_usage",
+        lambda path=None: storage.DiskUsage(total=100, free=11),
+    )
+    seen: list[dict] = []
+    events.subscribe(seen.append)
+    try:
+        await st["sweep"]()
+        await st["sweep"]()  # still live, still short: logged once, not per sweep
+    finally:
+        events.unsubscribe(seen.append)
+
+    assert st["recorder"].started == []
+    import app.db as db_mod
+    from app.models import LiveRecording
+
+    async with db_mod.async_session() as s:
+        assert (await s.execute(select(LiveRecording))).first() is None
+    skipped = [e for e in seen if e["type"] == "watch.skipped_space_floor"]
+    assert skipped == [
+        {
+            "type": "watch.skipped_space_floor",
+            "creator": row["display_name"],
+            "free_pct": 11.0,
+            "floor_pct": 10.0,
+        }
+    ]
+
+
 async def test_live_room_url_is_polled_instead_of_the_listing(watch_env):
     """bilibili keeps rooms in their own id space, so a lives-only watch polls
     the room and never touches the (rate-limited) space listing."""

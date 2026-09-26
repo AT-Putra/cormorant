@@ -335,6 +335,9 @@ async def test_reconcile_runs_before_the_recovery_sweep_starts(db, monkeypatch):
         async def reconcile_on_boot(self) -> None:
             order.append("reconcile")
 
+        async def start_watchdog(self) -> None:
+            order.append("watchdog")
+
         async def shutdown(self) -> None:
             pass
 
@@ -361,8 +364,10 @@ async def test_reconcile_runs_before_the_recovery_sweep_starts(db, monkeypatch):
         pass
 
     # Armed before reconcile, because reconcile can start fresh captures;
-    # reconcile before the sweep, so its rows are settled when claims are read.
-    assert order == ["arm", "reconcile", "recovery"]
+    # reconcile before the sweep, so its rows are settled when claims are read;
+    # reconcile before the watchdog, which would write off every leftover row
+    # as an orphan -- rooms reconcile is about to probe and resume.
+    assert order == ["arm", "reconcile", "watchdog", "recovery"]
 
 
 async def test_shutdown_latches_until_start_arms_it_again(sup, db, monkeypatch):
@@ -908,6 +913,262 @@ async def test_stop_between_engines_does_not_spawn_fallback(sup, db, monkeypatch
     assert rec.status == "ended"  # no AssertionError from unqueued spawn
 
 
+# ---- watchdog: orphans + space floor --------------------------------------------
+
+
+def _minutes_ago(n: int) -> datetime:
+    return models.utcnow() - timedelta(minutes=n)
+
+
+def low_disk(monkeypatch, free_pct: float) -> None:
+    """Media volume at `free_pct`% free (conftest pins it at 50%)."""
+    from app.services import storage
+
+    gib = 1024**3
+    monkeypatch.setattr(
+        storage,
+        "disk_usage",
+        lambda path=None: storage.DiskUsage(total=100 * gib, free=int(free_pct * gib)),
+    )
+
+
+def stoppable(monkeypatch, name: str) -> FakeProc:
+    """A long-running engine that exits cleanly on SIGINT, spawned once."""
+    proc = FakeProc(delay=999)
+    proc.on_signal = lambda sig: setattr(proc, "_delay", 0.0)
+    pin_out(monkeypatch, name)
+    script_spawns(monkeypatch, [proc])
+    monkeypatch.setattr(rec_mod, "_kill_tree", lambda pid: setattr(proc, "_delay", 0.0))
+    return proc
+
+
+async def test_a_finalize_the_disk_refused_is_retried_by_the_watchdog(sup, db, monkeypatch):
+    """The 2026-09-21 incident, replayed.
+
+    The media volume filled, the engines died, and _finalize's commit failed
+    -- the volume also holds the database. The error went to a log that could
+    not be written either, so the row sat in 'recording' for five days with
+    no supervisor, a dead Stop button, and its creator's later lives skipped
+    because the poller saw a capture already running.
+    """
+    pin_out(monkeypatch, "full.mp4")
+    script_spawns(monkeypatch, [FakeProc(exit_code=1), FakeProc(exit_code=1)])
+    real_finalize = sup._finalize
+
+    async def disk_full(*a, **k):
+        raise OSError(28, "database or disk is full")
+
+    monkeypatch.setattr(sup, "_finalize", disk_full)
+    rid = await make_recording(db, started_at=_minutes_ago(10))()
+    await asyncio.wait_for(sup.start_recording(rid), timeout=5)
+
+    assert (await fetch(db, rid)).status == "recording"  # stranded
+    assert rid not in sup._supervised
+
+    monkeypatch.setattr(sup, "_finalize", real_finalize)  # space freed
+    assert await sup.reap_orphans() == 1
+    rec = await fetch(db, rid)
+    assert rec.status == "failed"
+    assert rec.error == rec_mod.ORPHAN_ERROR
+    assert rec.output_path is None
+
+
+async def test_stop_on_a_row_nobody_supervises_finalizes_it(sup, db):
+    rid = await make_recording(db)()
+
+    assert await sup.stop(rid) is True  # was False -> a 409 from the Stop button
+
+    rec = await fetch(db, rid)
+    assert rec.status == "failed"
+    assert rec.error == rec_mod.ORPHAN_ERROR
+
+
+async def test_an_orphan_keeps_what_its_engine_wrote(sup, db):
+    capture = _media_root() / "tiktok" / "c1" / "live_20260921_162934.flv"
+    capture.parent.mkdir(parents=True)
+    part = capture.with_name(capture.name + ".part")
+    part.write_bytes(b"x" * 1000)
+    rid = await make_recording(db, output_path=str(capture))()
+
+    assert await sup.reap_orphan(rid) is True
+
+    rec = await fetch(db, rid)
+    mp4 = capture.with_suffix(".mp4")
+    assert rec.status == "interrupted"
+    assert rec.output_path == str(mp4)
+    assert mp4.read_bytes() == b"x" * 1000
+    assert not part.exists()
+    async with db.async_session() as s:
+        items = (await s.execute(select(models.LibraryItem))).scalars().all()
+    assert [i.file_path for i in items] == [str(mp4)]
+
+
+async def test_an_mp4_left_by_an_earlier_reap_is_registered(sup, db):
+    """Remux landed, then the database write failed: the FLV is gone, so the
+    retry must pick up the MP4 rather than call the capture empty."""
+    capture = _media_root() / "tiktok" / "c1" / "live_20260921_162934.flv"
+    capture.parent.mkdir(parents=True)
+    mp4 = capture.with_suffix(".mp4")
+    mp4.write_bytes(b"y" * 10)
+    rid = await make_recording(db, output_path=str(capture))()
+
+    assert await sup.reap_orphan(rid) is True
+
+    rec = await fetch(db, rid)
+    assert rec.status == "interrupted"
+    assert rec.output_path == str(mp4)
+
+
+async def test_reap_orphans_leaves_young_and_supervised_rows_alone(sup, db, monkeypatch):
+    stoppable(monkeypatch, "alive.mp4")
+    orphan = await make_recording(db, started_at=_minutes_ago(10))()
+    # The poller commits a row before it hands it to the supervisor.
+    young = await make_recording(db)()
+    alive = await make_recording(db, started_at=_minutes_ago(10))()
+    task = sup.start_recording(alive)
+    await asyncio.sleep(0.05)
+
+    assert await sup.reap_orphans() == 1
+
+    assert (await fetch(db, orphan)).status == "failed"
+    assert (await fetch(db, young)).status == "recording"
+    assert (await fetch(db, alive)).status == "recording"
+    assert await sup.stop(alive) is True
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+
+
+async def test_below_the_floor_running_captures_stop_and_say_why(sup, db, monkeypatch):
+    proc = stoppable(monkeypatch, "floor.mp4")
+    rid = await make_recording(db)()
+    task = sup.start_recording(rid)
+    await asyncio.sleep(0.05)
+
+    assert await sup.enforce_floor() == 0  # 50% free: nothing to do
+    low_disk(monkeypatch, free_pct=4.0)
+    assert await sup.enforce_floor() == 1
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+
+    assert proc.signals == [signal.SIGINT]  # the graceful stop, not a kill
+    rec = await fetch(db, rid)
+    assert rec.status == "interrupted"  # the host did not end it; retryable
+    assert rec.error == "stopped: free space 4.0% fell below the 10% floor"
+
+
+async def test_shutdown_during_a_floor_stop_does_not_hang(sup, db, monkeypatch):
+    """stop() swallowed CancelledError while it waited on the finalize, so a
+    watchdog cancelled mid floor-stop kept looping and shutdown() waited on
+    it forever -- after uvicorn had closed the listener."""
+    proc = stoppable(monkeypatch, "shutdown.mp4")
+    real_finalize = sup._finalize
+
+    async def slow_finalize(*a, **k):
+        await asyncio.sleep(1.0)
+        await real_finalize(*a, **k)
+
+    monkeypatch.setattr(sup, "_finalize", slow_finalize)
+    rid = await make_recording(db)()
+    sup.start_recording(rid)
+    await asyncio.sleep(0.05)
+    low_disk(monkeypatch, free_pct=4.0)
+    sup.watchdog_s = 0.01
+    await sup.start_watchdog()
+    for _ in range(200):
+        if proc.signals:
+            break
+        await asyncio.sleep(0.01)
+    assert proc.signals == [signal.SIGINT]  # the floor stop is under way
+    await asyncio.sleep(0.3)  # past the SIGINT poll, into the finalize wait
+
+    await asyncio.wait_for(sup.shutdown(), timeout=5)
+
+    assert sup._watchdog is None
+
+
+async def test_one_failed_floor_stop_does_not_spare_the_rest(sup, db, monkeypatch):
+    first, second = FakeProc(pid=1, delay=999), FakeProc(pid=2, delay=999)
+    for p in (first, second):
+        p.on_signal = lambda sig, p=p: setattr(p, "_delay", 0.0)
+    pin_out(monkeypatch, "two.mp4")
+    script_spawns(monkeypatch, [first, second])
+    monkeypatch.setattr(rec_mod, "_kill_tree", lambda pid: None)
+    a = await make_recording(db, creator="a")()
+    b = await make_recording(db, creator="b")()
+    task_a, task_b = sup.start_recording(a), sup.start_recording(b)
+    await asyncio.sleep(0.05)
+    real_stop = sup.stop
+
+    async def flaky_stop(rid, *args, **kwargs):
+        if rid == a:
+            raise OSError(28, "No space left on device")
+        return await real_stop(rid, *args, **kwargs)
+
+    monkeypatch.setattr(sup, "stop", flaky_stop)
+    low_disk(monkeypatch, free_pct=4.0)
+
+    assert await sup.enforce_floor() == 2
+    await asyncio.wait_for(asyncio.shield(task_b), timeout=5)
+
+    assert second.signals == [signal.SIGINT]
+    assert (await fetch(db, b)).status == "interrupted"
+    first._delay = 0.0  # let a's stand-in exit before teardown
+    await asyncio.wait_for(asyncio.shield(task_a), timeout=5)
+
+
+async def test_stop_and_the_watchdog_reap_an_orphan_once(sup, db, monkeypatch):
+    """Both reached reap_orphan, and two remuxes truncating one MP4 followed
+    by a second LibraryItem for the same file_path is what that did."""
+    capture = _media_root() / "tiktok" / "c1" / "live_20260921_162934.flv"
+    capture.parent.mkdir(parents=True)
+    capture.write_bytes(b"z" * 100)
+
+    async def slow_remux(src, dst):
+        await asyncio.sleep(0.2)
+        dst.write_bytes(src.read_bytes())
+        return True
+
+    monkeypatch.setattr(rec_mod, "remux_to_mp4", slow_remux)
+    rid = await make_recording(
+        db, output_path=str(capture), started_at=_minutes_ago(10)
+    )()
+
+    reaped, stopped = await asyncio.gather(sup.reap_orphans(), sup.stop(rid))
+
+    assert reaped + int(stopped) == 1
+    async with db.async_session() as s:
+        items = (await s.execute(select(models.LibraryItem))).scalars().all()
+    assert len(items) == 1
+    assert (await fetch(db, rid)).status == "interrupted"
+
+
+async def test_a_floor_of_zero_never_stops_a_capture(sup, db, monkeypatch):
+    from app.services.settings_store import save_settings
+
+    async with db.async_session() as s:
+        await save_settings(s, {"space_floor_pct": 0})
+    proc = stoppable(monkeypatch, "nofloor.mp4")
+    rid = await make_recording(db)()
+    task = sup.start_recording(rid)
+    await asyncio.sleep(0.05)
+    low_disk(monkeypatch, free_pct=0.5)
+
+    assert await sup.enforce_floor() == 0
+    assert proc.signals == []
+    assert await sup.stop(rid) is True
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+
+
+async def test_shutdown_cancels_the_watchdog(sup, db):
+    sup.watchdog_s = 3600
+    await sup.start_watchdog()
+    watchdog = sup._watchdog
+    assert watchdog is not None and not watchdog.done()
+
+    await sup.shutdown()
+
+    assert watchdog.cancelled()
+    assert sup._watchdog is None
+
+
 # ---- reconcile_on_boot -----------------------------------------------------------
 
 
@@ -935,6 +1196,32 @@ async def test_reconcile_watchlist_still_live_retriggers(sup, db, monkeypatch):
     assert old.error
     assert retriggered == [
         ("https://live.bilibili.com/123", "bilibili", "c1", "watchlist")
+    ]
+
+
+async def test_reconcile_does_not_resume_into_a_short_disk(sup, db, monkeypatch):
+    from app.services import events
+
+    rid = await make_recording(db, origin="watchlist")()
+    monkeypatch.setattr(rec_mod, "probe_is_live", lambda url, cookiefile=None: True)
+    retriggered = []
+
+    async def fake_begin(*a, **k):
+        retriggered.append(a)
+
+    monkeypatch.setattr(rec_mod, "begin_recording", fake_begin)
+    low_disk(monkeypatch, free_pct=11.0)  # floor 10, a new capture needs 12
+    seen: list[dict] = []
+    events.subscribe(seen.append)
+    try:
+        await sup.reconcile_on_boot()
+    finally:
+        events.unsubscribe(seen.append)
+
+    assert retriggered == []
+    assert (await fetch(db, rid)).status == "interrupted"
+    assert [e["type"] for e in seen if e["type"].startswith("watch.")] == [
+        "watch.skipped_space_floor"
     ]
 
 

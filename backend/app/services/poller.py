@@ -13,7 +13,7 @@ import re
 from sqlalchemy import select
 
 from app import models
-from app.services import credential_health, events, ytdlp
+from app.services import credential_health, events, storage, ytdlp
 from app.services.settings_store import aget_settings
 
 log = logging.getLogger(__name__)
@@ -149,10 +149,14 @@ def latest_entry(info: dict) -> dict | None:
 class PollerService:
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
+        # Watch ids whose current live is being skipped for space, so it is
+        # logged once per live -- not once per sweep into a disk that is short.
+        self._floor_skipped: set[int] = set()
 
     # ---- lifecycle -------------------------------------------------------
 
     async def start(self) -> None:
+        self._floor_skipped.clear()
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._loop())
 
@@ -296,9 +300,28 @@ class PollerService:
 
     async def _check_live(self, watch: models.CreatorWatch, info: dict) -> None:
         if not is_live(info):
+            self._floor_skipped.discard(watch.id)
             return
         if await self._has_active_recording(watch):
             return  # already capturing this creator
+        space = await storage.space_status()
+        if space is not None and not space.room_to_start:
+            # No row: the room is re-checked every sweep, so a row here would
+            # be one more dead recording per interval. The margin above the
+            # floor (storage.room_to_start) is what keeps a capture just
+            # stopped AT the floor from restarting as soon as its FLV is freed.
+            if watch.id not in self._floor_skipped:
+                self._floor_skipped.add(watch.id)
+                events.publish(
+                    {
+                        "type": "watch.skipped_space_floor",
+                        "creator": watch.display_name,
+                        "free_pct": round(space.usage.free_pct, 1),
+                        "floor_pct": space.floor_pct,
+                    }
+                )
+            return
+        self._floor_skipped.discard(watch.id)
         async with _db() as s:
             rec = models.LiveRecording(
                 room_url=room_url(watch),

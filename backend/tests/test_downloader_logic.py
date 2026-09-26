@@ -619,7 +619,7 @@ async def test_the_first_rate_reading_has_nothing_to_subtract_from(
 async def test_space_floor_gate_pauses_auto_only(mgr, db, fake_engine, monkeypatch):
     from app.services import downloader as dl
 
-    monkeypatch.setattr(dl, "free_space_pct", lambda path: 1.0)  # below floor 5%
+    monkeypatch.setattr(dl, "free_space_pct", lambda path: 1.0)  # below floor 10%
 
     auto_job, add_auto = make_job(db, is_auto=True)
     manual_job, add_manual = make_job(db, is_auto=False)
@@ -651,11 +651,11 @@ async def test_hysteresis_resume_only_touches_space_floor_jobs(
         await s.commit()
 
     # Below floor+2 -> no resume.
-    monkeypatch.setattr(dl, "free_space_pct", lambda path: 6.0)  # floor 5, need 7
+    monkeypatch.setattr(dl, "free_space_pct", lambda path: 11.0)  # floor 10, need 12
     assert await mgr.resume_space_floor_jobs() == 0
 
     # At floor+2 -> only the space-floor job re-enqueues.
-    monkeypatch.setattr(dl, "free_space_pct", lambda path: 7.0)
+    monkeypatch.setattr(dl, "free_space_pct", lambda path: 12.0)
     assert await mgr.resume_space_floor_jobs() == 1
     assert fake_engine.calls["download"] == []
 

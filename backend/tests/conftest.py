@@ -118,6 +118,24 @@ async def _seed_session(db_mod) -> str:
     return token
 
 
+GIB = 1024**3
+
+
+@pytest.fixture(autouse=True)
+def roomy_disk(monkeypatch):
+    """Tests never read the real disk's free space.
+
+    The floor now gates recordings as well as auto downloads, so every poller
+    and recorder test would otherwise pass or fail on how full the machine
+    running it happens to be. Half free; floor tests set their own number.
+    """
+    from app.services import storage
+
+    monkeypatch.setattr(
+        storage, "disk_usage", lambda path=None: storage.DiskUsage(total=100 * GIB, free=50 * GIB)
+    )
+
+
 @pytest.fixture
 async def authed_client(tmp_path, monkeypatch):
     """TestClient with a valid session cookie preset; middleware live."""

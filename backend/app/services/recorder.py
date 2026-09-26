@@ -26,18 +26,24 @@ import os
 import signal
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import select
 
 from app import models
-from app.services import browser, events, ytdlp
+from app.services import browser, events, storage, ytdlp
 
 log = logging.getLogger(__name__)
 
 TERMINATE_GRACE_S = 10.0
 STOP_POLL_S = 0.2
+# How often the watchdog checks free space and looks for orphaned rows.
+WATCHDOG_S = 30.0
+# A row is born before its supervisor: the poller commits it, then starts the
+# task. Anything younger than this may simply not have been handed over yet.
+ORPHAN_GRACE_S = 120.0
+ORPHAN_ERROR = "capture lost: its supervisor ended without recording an outcome"
 
 
 def _db():
@@ -343,18 +349,28 @@ class RecorderSupervisor:
         # engines does not start another one on the way out.
         self._shutting_down = False
         self.grace_s = TERMINATE_GRACE_S
+        # Every recording with a live supervision task, from the moment it is
+        # created -- _registry only learns of one once an engine has spawned.
+        # A 'recording' row missing from here has nobody left to finalize it.
+        self._supervised: set[int] = set()
+        # recording_id -> why a stop was ordered, persisted as the row's error
+        # (a floor stop has to say so, or it reads as the host ending).
+        self._reasons: dict[int, str] = {}
+        self._watchdog: asyncio.Task | None = None
+        self.watchdog_s = WATCHDOG_S
 
     # ---- lifecycle -------------------------------------------------------
 
     def start_recording(self, recording_id: int) -> asyncio.Task | None:
         """Begin supervising a 'recording'-status LiveRecording row."""
-        # ponytail: guard is advisory — two starts racing the registry write
-        # inside _supervise can double-spawn; single-user app, acceptable.
-        if recording_id in self._registry:
+        if recording_id in self._supervised:
             return None
+        self._supervised.add(recording_id)
         return asyncio.create_task(self._supervise(recording_id))
 
-    async def stop(self, recording_id: int) -> bool:
+    async def stop(
+        self, recording_id: int, reason: str | None = None, as_status: str = "ended"
+    ) -> bool:
         """Graceful stop: SIGINT to the group, grace window, then kill.
         Records 'ended' intent so the exit handler doesn't mark 'failed'.
 
@@ -363,12 +379,20 @@ class RecorderSupervisor:
         it asks ffmpeg to quit, keeps the bytes and renames the .part. SIGTERM
         has no handler, so the process died where it stood and every user stop
         left a temp file the supervisor then read as "produced nothing".
-        captured_file covers the deaths no signal choice can make graceful."""
+        captured_file covers the deaths no signal choice can make graceful.
+
+        A row nothing supervises any more has no engine to signal. Refusing
+        it with a 409 left the Stop button dead on a capture that had been
+        gone for five days; finalizing it is the only stop there is."""
         entry = self._registry.get(recording_id)
         if not entry or entry[0] is None:
+            if recording_id not in self._supervised:
+                return await self.reap_orphan(recording_id)
             return False
         proc = entry[0]
-        self._intended[recording_id] = "ended"
+        self._intended[recording_id] = as_status
+        if reason:
+            self._reasons[recording_id] = reason
         try:
             _signal_group(proc, signal.SIGINT)
         except ProcessLookupError:
@@ -383,9 +407,41 @@ class RecorderSupervisor:
         if entry[1] is not None:
             try:
                 await asyncio.wait_for(asyncio.shield(entry[1]), timeout=5)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError:
                 pass
+            except asyncio.CancelledError:
+                # The supervision task being cancelled is its business; the
+                # CALLER being cancelled is not ours to swallow. The floor
+                # watchdog calls this, and eating shutdown's cancel kept the
+                # watchdog looping while shutdown() waited on it forever.
+                me = asyncio.current_task()
+                if me is not None and me.cancelling():
+                    raise
         return True
+
+    async def start_watchdog(self) -> None:
+        """Begin the free-space and orphan checks (main.py lifespan).
+
+        Separate from start() because it has to come AFTER reconcile_on_boot:
+        at boot every leftover 'recording' row is unsupervised, and those are
+        reconcile's to probe and retrigger, not the watchdog's to write off.
+        """
+        if self._watchdog is None or self._watchdog.done():
+            self._watchdog = asyncio.create_task(self._watch())
+
+    async def _watch(self) -> None:
+        while True:
+            await asyncio.sleep(self.watchdog_s)
+            if self._shutting_down:
+                return  # engines are being killed; there is nothing to guard
+            try:
+                await self.enforce_floor()
+            except Exception:
+                log.exception("space floor check failed")
+            try:
+                await self.reap_orphans()
+            except Exception:
+                log.exception("orphan reap failed")
 
     async def start(self) -> None:
         """Arm the supervisor for a fresh process life.
@@ -408,6 +464,10 @@ class RecorderSupervisor:
     async def shutdown(self) -> None:
         """Kill every registered engine child (main.py lifespan teardown)."""
         self._shutting_down = True
+        if self._watchdog is not None:
+            self._watchdog.cancel()
+            await asyncio.gather(self._watchdog, return_exceptions=True)
+            self._watchdog = None
         for rid, (proc, _task) in list(self._registry.items()):
             if proc is not None and getattr(proc, "returncode", 0) is None:
                 try:
@@ -432,6 +492,8 @@ class RecorderSupervisor:
         finally:
             self._registry.pop(recording_id, None)
             self._intended.pop(recording_id, None)
+            self._reasons.pop(recording_id, None)
+            self._supervised.discard(recording_id)
 
     async def _supervise_inner(self, recording_id: int) -> None:
         async with _db() as session:
@@ -518,7 +580,9 @@ class RecorderSupervisor:
         )
 
         if intended:
-            await self._finalize(recording_id, intended, final_path, None)
+            await self._finalize(
+                recording_id, intended, final_path, self._reasons.pop(recording_id, None)
+            )
         elif rc == 0 and captured:
             await self._finalize(recording_id, "finished", final_path, None)
         elif self._shutting_down:
@@ -599,6 +663,129 @@ class RecorderSupervisor:
             payload["error"] = error[:200]
         events.publish(payload)
 
+    # ---- watchdog ------------------------------------------------------------
+
+    async def enforce_floor(self) -> int:
+        """Stop and save every running capture once free space is below the
+        floor. Returns how many were told to stop.
+
+        Stopping costs the rest of the stream; not stopping cost everything
+        else. The volume that holds the media also holds the database and
+        Docker's own log, so a full disk did not just end the capture -- the
+        row could not be finalized, the error could not be logged, and the
+        orphan sat in 'recording' for five days, blocking that creator's
+        every later live. Stopping at the floor leaves room for the remux
+        and for the app to keep writing.
+        """
+        running = [
+            rid
+            for rid, (proc, _task) in self._registry.items()
+            if proc is not None
+            and proc.returncode is None
+            and rid not in self._intended
+        ]
+        if not running:
+            return 0
+        status = await storage.space_status()
+        if status is None or not status.below_floor:
+            return 0
+        reason = (
+            f"stopped: free space {status.usage.free_pct:.1f}% "
+            f"fell below the {status.floor_pct:g}% floor"
+        )
+        log.warning("%s; stopping %d capture(s)", reason, len(running))
+
+        async def _stop(rid: int) -> None:
+            # Gone since the snapshot: stop() would take it for an orphan and
+            # remux it inline, on a disk that is already short.
+            if rid not in self._registry:
+                return
+            # 'interrupted', not 'ended': the host did not end it, and it is
+            # the status the retry endpoint accepts.
+            await self.stop(rid, reason=reason, as_status="interrupted")
+
+        # Together: each stop can wait out a 15s grace, and one that raises
+        # must not leave the rest writing into the last of the disk.
+        results = await asyncio.gather(
+            *(_stop(rid) for rid in running), return_exceptions=True
+        )
+        for rid, result in zip(running, results):
+            if isinstance(result, BaseException):
+                log.error("floor stop failed for recording %s: %r", rid, result)
+        return len(running)
+
+    async def reap_orphans(self) -> int:
+        """Finalize every 'recording' row that has no supervisor behind it.
+
+        Nothing else would: the poller skips a creator with an active row,
+        Stop found no engine to signal, and reconcile_on_boot only runs at a
+        restart. A failed _finalize (the database write is the first thing a
+        full disk takes) left the row there silently, so this retries every
+        cycle until the write goes through.
+        """
+        cutoff = models.utcnow() - timedelta(seconds=ORPHAN_GRACE_S)
+        async with _db() as session:
+            ids = (
+                (
+                    await session.execute(
+                        select(models.LiveRecording.id).where(
+                            models.LiveRecording.status == "recording",
+                            models.LiveRecording.started_at < cutoff,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        reaped = 0
+        for rid in ids:
+            if rid in self._supervised:
+                continue
+            if await self.reap_orphan(rid):
+                log.warning("recording %s had no supervisor; finalized", rid)
+                reaped += 1
+        return reaped
+
+    async def reap_orphan(self, recording_id: int) -> bool:
+        """Finalize one unsupervised 'recording' row. True when it was one.
+
+        Whatever the lost engine wrote is kept and registered, the same as a
+        stopped capture: 'interrupted' with the bytes, 'failed' without.
+        """
+        if recording_id in self._supervised:
+            return False
+        # Claimed for the whole reap, and before the first await: Stop and the
+        # watchdog can both arrive here, and two remuxes truncating the same
+        # MP4 -- then two LibraryItems for one file_path -- is what follows.
+        # stop(), reap_orphans() and this check all skip a claimed id.
+        self._supervised.add(recording_id)
+        try:
+            return await self._reap_claimed(recording_id)
+        finally:
+            self._supervised.discard(recording_id)
+
+    async def _reap_claimed(self, recording_id: int) -> bool:
+        async with _db() as session:
+            rec = await session.get(models.LiveRecording, recording_id)
+        if rec is None or rec.status != "recording":
+            return False
+        final_path: Path | None = None
+        if rec.output_path:
+            capture = Path(rec.output_path)
+            mp4 = capture.with_suffix(".mp4")
+            captured = captured_file(capture)
+            if captured is not None:
+                final_path = await self._finalize_container(captured, mp4)
+            elif mp4.is_file():
+                # Remuxed by an earlier attempt whose database write failed;
+                # the FLV is gone, so the MP4 is all there is to register.
+                final_path = mp4
+        if final_path is not None:
+            await self._finalize(recording_id, "interrupted", final_path, ORPHAN_ERROR)
+        else:
+            await self._finalize(recording_id, "failed", None, ORPHAN_ERROR)
+        return True
+
     # ---- boot reconciliation ----------------------------------------------
 
     async def reconcile_on_boot(self) -> None:
@@ -638,6 +825,20 @@ class RecorderSupervisor:
                 await self._patch_status(
                     rec.id, "interrupted", error="interrupted by app restart"
                 )
+                space = await storage.space_status()
+                if space is not None and not space.room_to_start:
+                    # Same rule as the poller, which picks the room up again
+                    # once there is room: a restart is no reason to record
+                    # into the last of the disk.
+                    events.publish(
+                        {
+                            "type": "watch.skipped_space_floor",
+                            "creator": rec.creator,
+                            "free_pct": round(space.usage.free_pct, 1),
+                            "floor_pct": space.floor_pct,
+                        }
+                    )
+                    continue
                 new = await begin_recording(
                     rec.room_url, rec.platform, rec.creator, origin="watchlist"
                 )

@@ -18,6 +18,7 @@ from app.routers import (
     notifications,
     recordings,
     settings,
+    storage,
     watchlist,
     ws,
 )
@@ -53,6 +54,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # this runs -- so a boot sweep that got there first skipped the very
     # orphans it exists to collect, and they waited a full 10-minute cycle.
     await recorder.reconcile_on_boot()
+    # After reconcile too: until it has run, every leftover 'recording' row is
+    # unsupervised, and the watchdog would write off rooms reconcile resumes.
+    await recorder.start_watchdog()
     await recovery.start()
     yield
     await recorder.shutdown()
@@ -87,6 +91,7 @@ def create_app() -> FastAPI:
     app.include_router(library.router)
     app.include_router(credentials.router)
     app.include_router(settings.router)
+    app.include_router(storage.router)
     app.include_router(activity.router)
     app.include_router(notifications.router)
     app.include_router(ws.router)
