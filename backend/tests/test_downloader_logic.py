@@ -598,7 +598,14 @@ async def test_the_first_rate_reading_has_nothing_to_subtract_from(
         out = y.output_dir(job)
         out.mkdir(parents=True, exist_ok=True)
         (out / "T.mp4.part").write_bytes(b"0" * 5_000_000)  # written once
-        time.sleep(0.12)  # several poll windows, no growth
+        # Hold the file unchanged until two readings are in -- the first one
+        # is the bug, the second the steady state. Was a fixed 0.12s, which a
+        # slow CI runner spent before the watcher's first DB write landed.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if sum(e.get("type") == "job.progress" for e in seen) >= 2:
+                break
+            time.sleep(0.01)
         return FakeInfo(requested_downloads=[{"filepath": str(out / "T.mp4")}])
 
     fake_engine.download = already_large

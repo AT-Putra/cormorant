@@ -179,6 +179,20 @@ def pin_out(monkeypatch, name: str) -> Path:
     return out
 
 
+async def engine_up(sup, rid: int, proc: "FakeProc | None" = None) -> None:
+    """Wait until an engine (or this one) is registered for `rid`.
+
+    Was a fixed 50ms sleep, and a slow CI runner lost that race: stop() found
+    no engine yet and returned False, failing a test about something else.
+    """
+    for _ in range(500):
+        entry = sup._registry.get(rid)
+        if entry and entry[0] is not None and (proc is None or entry[0] is proc):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"no engine registered for recording {rid}")
+
+
 # ---- engine chain + filename ---------------------------------------------------
 
 
@@ -418,7 +432,7 @@ async def test_shutdown_does_not_start_the_fallback_engine(sup, db, monkeypatch)
 
     rid = await make_recording(db)()
     task = sup.start_recording(rid)
-    await asyncio.sleep(0.05)  # let supervise register the engine
+    await engine_up(sup, rid)
 
     def fake_kill(pid):
         first._delay = 0.0  # the tree dies
@@ -461,7 +475,7 @@ async def test_shutdown_on_the_last_engine_registers_what_it_captured(
 
     rid = await make_recording(db, origin="watchlist")()
     task = sup.start_recording(rid)
-    await asyncio.sleep(0.05)  # let supervise reach the second engine
+    await engine_up(sup, rid, second)
 
     def fake_kill(pid):
         second._delay = 0.0
@@ -492,7 +506,7 @@ async def test_shutdown_on_the_last_engine_with_nothing_captured(sup, db, monkey
 
     rid = await make_recording(db, origin="watchlist")()
     task = sup.start_recording(rid)
-    await asyncio.sleep(0.05)
+    await engine_up(sup, rid, second)
 
     monkeypatch.setattr(rec_mod, "_kill_tree", lambda pid: setattr(second, "_delay", 0.0))
     await asyncio.wait_for(sup.shutdown(), timeout=10)
@@ -615,7 +629,7 @@ async def test_stop_finalizes_the_part_the_engine_left(sup, db, monkeypatch):
 
     rid = await make_recording(db)()
     task = sup.start_recording(rid)
-    await asyncio.sleep(0.05)
+    await engine_up(sup, rid)
     assert await sup.stop(rid) is True
     await asyncio.wait_for(asyncio.shield(task), timeout=5)
 
@@ -825,7 +839,7 @@ async def test_stop_sigint_then_kill_tree_marks_ended(sup, db, monkeypatch):
 
     rid = await make_recording(db)()
     task = sup.start_recording(rid)
-    await asyncio.sleep(0.05)  # let supervise register the proc
+    await engine_up(sup, rid)
     assert await sup.stop(rid) is True
     await asyncio.wait_for(asyncio.shield(task), timeout=5)
 
@@ -851,7 +865,7 @@ async def test_stop_graceful_exit_within_window_no_kill(sup, db, monkeypatch):
 
     rid = await make_recording(db)()
     task = sup.start_recording(rid)
-    await asyncio.sleep(0.05)
+    await engine_up(sup, rid)
     assert await sup.stop(rid) is True
     await asyncio.wait_for(asyncio.shield(task), timeout=5)
 
@@ -906,7 +920,7 @@ async def test_stop_between_engines_does_not_spawn_fallback(sup, db, monkeypatch
 
     rid = await make_recording(db)()
     task = sup.start_recording(rid)
-    await asyncio.sleep(0.05)
+    await engine_up(sup, rid)
     assert await sup.stop(rid) is True
     await asyncio.wait_for(asyncio.shield(task), timeout=5)
     rec = await fetch(db, rid)
@@ -1026,7 +1040,7 @@ async def test_reap_orphans_leaves_young_and_supervised_rows_alone(sup, db, monk
     young = await make_recording(db)()
     alive = await make_recording(db, started_at=_minutes_ago(10))()
     task = sup.start_recording(alive)
-    await asyncio.sleep(0.05)
+    await engine_up(sup, alive)
 
     assert await sup.reap_orphans() == 1
 
@@ -1041,7 +1055,7 @@ async def test_below_the_floor_running_captures_stop_and_say_why(sup, db, monkey
     proc = stoppable(monkeypatch, "floor.mp4")
     rid = await make_recording(db)()
     task = sup.start_recording(rid)
-    await asyncio.sleep(0.05)
+    await engine_up(sup, rid)
 
     assert await sup.enforce_floor() == 0  # 50% free: nothing to do
     low_disk(monkeypatch, free_pct=4.0)
@@ -1068,7 +1082,7 @@ async def test_shutdown_during_a_floor_stop_does_not_hang(sup, db, monkeypatch):
     monkeypatch.setattr(sup, "_finalize", slow_finalize)
     rid = await make_recording(db)()
     sup.start_recording(rid)
-    await asyncio.sleep(0.05)
+    await engine_up(sup, rid)
     low_disk(monkeypatch, free_pct=4.0)
     sup.watchdog_s = 0.01
     await sup.start_watchdog()
@@ -1094,7 +1108,8 @@ async def test_one_failed_floor_stop_does_not_spare_the_rest(sup, db, monkeypatc
     a = await make_recording(db, creator="a")()
     b = await make_recording(db, creator="b")()
     task_a, task_b = sup.start_recording(a), sup.start_recording(b)
-    await asyncio.sleep(0.05)
+    await engine_up(sup, a)
+    await engine_up(sup, b)
     real_stop = sup.stop
 
     async def flaky_stop(rid, *args, **kwargs):
@@ -1148,7 +1163,7 @@ async def test_a_floor_of_zero_never_stops_a_capture(sup, db, monkeypatch):
     proc = stoppable(monkeypatch, "nofloor.mp4")
     rid = await make_recording(db)()
     task = sup.start_recording(rid)
-    await asyncio.sleep(0.05)
+    await engine_up(sup, rid)
     low_disk(monkeypatch, free_pct=0.5)
 
     assert await sup.enforce_floor() == 0
