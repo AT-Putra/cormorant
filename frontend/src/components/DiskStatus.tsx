@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
 import { api, type StorageStatus } from "../api/client";
-import { StorageContext, fmtSize, useStorage } from "./storageContext";
+import { StorageContext, fmtAge, fmtSize, useStorage } from "./storageContext";
 
 // Free space moves slowly (a capture writes ~1 GB an hour), so a minute-scale
 // poll is plenty; the Settings page refreshes on its own after a floor change.
 const POLL_MS = 30_000;
+// Two missed polls: one can be a blip (a deploy restarts the app in seconds),
+// two in a row means the number on screen is no longer being checked.
+const STALE_MS = 2.5 * POLL_MS;
 // "Low" starts this many percentage points above the floor: early enough to
 // free space before recordings are stopped, late enough not to cry wolf.
 const LOW_MARGIN_PCT = 5;
@@ -34,18 +37,40 @@ const DRIVE_ICON =
   "M22 12H2M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11ZM6 16h.01M10 16h.01";
 const ALERT_ICON =
   "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3ZM12 9v4M12 17h.01";
+// Lucide clock: the reading is old. Wins over the level glyph because an
+// old "ok" is exactly the reading that must not look reassuring.
+const STALE_ICON = "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20ZM12 6v6l4 2";
 
 export function StorageProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<StorageStatus | null>(null);
+  // When the reading was taken, and when a poll last ran at all: the gap is
+  // how long the meter has been showing a number nobody has confirmed.
+  const [checkedAt, setCheckedAt] = useState<number | null>(null);
+  const [attemptedAt, setAttemptedAt] = useState<number | null>(null);
+  // Poll order. A slow interval poll landing after the refresh that follows a
+  // floor change put the OLD floor back on screen until the next poll.
+  const issued = useRef(0);
+  const applied = useRef(0);
 
   const refresh = useCallback(() => {
+    const mine = ++issued.current;
     api
       .storage()
-      .then(setStatus)
-      // Unknown is not empty: keep showing the last reading rather than
-      // flashing the meter away on one failed poll.
-      .catch(() => {});
+      .then((s) => {
+        if (mine < applied.current) return; // overtaken by a newer answer
+        applied.current = mine;
+        const now = Date.now();
+        setStatus(s);
+        setCheckedAt(now);
+        setAttemptedAt(now);
+      })
+      // Unknown is not empty: keep the last reading rather than flashing the
+      // meter away on one failed poll -- but age it, so it can go stale.
+      .catch(() => setAttemptedAt(Date.now()));
   }, []);
+
+  const ageMs = checkedAt !== null && attemptedAt !== null ? attemptedAt - checkedAt : null;
+  const stale = ageMs !== null && ageMs > STALE_MS;
 
   useEffect(() => {
     refresh();
@@ -58,21 +83,25 @@ export function StorageProvider({ children }: { children: React.ReactNode }) {
     };
   }, [refresh]);
 
-  return <StorageContext.Provider value={{ status, refresh }}>{children}</StorageContext.Provider>;
+  return (
+    <StorageContext.Provider value={{ status, ageMs, stale, refresh }}>{children}</StorageContext.Provider>
+  );
 }
 
 /** Header meter: free space at a glance, links to the floor setting. */
 export function DiskMeter({ className }: { className?: string }) {
-  const { status } = useStorage();
+  const { status, ageMs, stale } = useStorage();
   if (!status) return null;
 
   const level = levelOf(status);
   const style = LEVEL_STYLES[level];
   const usedPct = Math.min(100, Math.max(0, 100 - status.free_pct));
+  const age = stale && ageMs !== null ? fmtAge(ageMs) : null;
   const detail =
     `${fmtSize(status.free_bytes)} free of ${fmtSize(status.total_bytes)} ` +
     `(${status.free_pct.toFixed(1)}%)` +
-    (status.floor_pct > 0 ? ` · floor ${status.floor_pct}%` : " · no floor");
+    (status.floor_pct > 0 ? ` · floor ${status.floor_pct}%` : " · no floor") +
+    (age ? ` · last checked ${age} ago, not updating` : "");
 
   return (
     <NavLink
@@ -91,7 +120,7 @@ export function DiskMeter({ className }: { className?: string }) {
         aria-hidden
         className={`h-4 w-4 shrink-0 ${style.text}`}
       >
-        <path d={level === "ok" ? DRIVE_ICON : ALERT_ICON} />
+        <path d={age ? STALE_ICON : level === "ok" ? DRIVE_ICON : ALERT_ICON} />
       </svg>
       <span className={`font-medium tabular-nums ${style.text}`}>
         {fmtSize(status.free_bytes)}
@@ -106,6 +135,7 @@ export function DiskMeter({ className }: { className?: string }) {
       {style.label && (
         <span className={`pill max-sm:hidden ${style.pill} ${style.text}`}>{style.label}</span>
       )}
+      {age && <span className="pill bg-surface-3 text-ink-dim max-sm:hidden">{age} old</span>}
     </NavLink>
   );
 }
@@ -113,10 +143,12 @@ export function DiskMeter({ className }: { className?: string }) {
 /** Shown on every page while new recordings can't start -- the only other
  *  trace of a skipped live is a line in the activity log. */
 export function DiskBanner() {
-  const { status } = useStorage();
+  const { status, ageMs, stale } = useStorage();
   if (!status || (!status.below_floor && status.room_to_start)) return null;
 
-  const free = `${fmtSize(status.free_bytes)} free (${status.free_pct.toFixed(1)}%)`;
+  const free =
+    `${fmtSize(status.free_bytes)} free (${status.free_pct.toFixed(1)}%` +
+    (stale && ageMs !== null ? `, as of ${fmtAge(ageMs)} ago)` : ")");
   const below = status.below_floor;
 
   return (

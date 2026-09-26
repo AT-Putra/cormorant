@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type AppSettings, type CredentialInfo } from "../api/client";
-import { fmtSize, useStorage } from "../components/storageContext";
+import { fmtAge, fmtSize, useStorage } from "../components/storageContext";
 
 const PLATFORMS = ["bilibili", "instagram", "tiktok", "douyin", "xhs"] as const;
 
@@ -14,7 +14,7 @@ export default function SettingsPage() {
   const [ytdlp, setYtdlp] = useState<string>("…");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const { status: disk, refresh: refreshDisk } = useStorage();
+  const { status: disk, ageMs: diskAge, stale: diskStale, refresh: refreshDisk } = useStorage();
 
   // cookie paste dialog state
   const [cookiePlatform, setCookiePlatform] = useState<(typeof PLATFORMS)[number] | null>(null);
@@ -211,7 +211,8 @@ export default function SettingsPage() {
                   <span id="space-floor-help" className="mt-1.5 block tabular-nums text-ink-faint">
                     {disk.floor_pct > 0 ? `= ${fmtSize(disk.floor_bytes)} · ` : "Off · "}
                     <span className={disk.below_floor ? "text-bad" : !disk.room_to_start ? "text-warn" : ""}>
-                      {disk.free_pct.toFixed(1)}% free now
+                      {disk.free_pct.toFixed(1)}% free{" "}
+                      {diskStale && diskAge !== null ? `${fmtAge(diskAge)} ago` : "now"}
                     </span>
                   </span>
                 )}
