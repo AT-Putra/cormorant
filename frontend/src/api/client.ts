@@ -92,6 +92,22 @@ export interface AppSettings {
   default_quality: string;
 }
 
+/** Media volume, as the space floor sees it (GET /api/storage). */
+export interface StorageStatus {
+  total_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+  free_pct: number;
+  floor_pct: number;
+  floor_bytes: number;
+  /** Free % a new recording needs to start: floor + margin, 0 with no floor. */
+  start_pct: number;
+  /** Running recordings are being stopped and saved. */
+  below_floor: boolean;
+  /** False while new lives are skipped (below start_pct). */
+  room_to_start: boolean;
+}
+
 export interface LibraryItem {
   id: number;
   title: string;
@@ -206,6 +222,7 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(patch),
     }),
+  storage: () => request<StorageStatus>("/api/storage"),
   ytdlpVersion: () => request<{ version: string }>("/api/settings/ytdlp/version"),
   ytdlpUpdate: () =>
     request<{ updated: boolean; restarting: boolean; version: string }>("/api/settings/ytdlp/update", { method: "POST" }),

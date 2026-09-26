@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type AppSettings, type CredentialInfo } from "../api/client";
+import { fmtSize, useStorage } from "../components/storageContext";
 
 const PLATFORMS = ["bilibili", "instagram", "tiktok", "douyin", "xhs"] as const;
 
@@ -13,6 +14,7 @@ export default function SettingsPage() {
   const [ytdlp, setYtdlp] = useState<string>("…");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { status: disk, refresh: refreshDisk } = useStorage();
 
   // cookie paste dialog state
   const [cookiePlatform, setCookiePlatform] = useState<(typeof PLATFORMS)[number] | null>(null);
@@ -85,6 +87,8 @@ export default function SettingsPage() {
     try {
       const res = await api.saveSettings(patch);
       setSettings(res.settings);
+      // The header meter and banner judge free space against the floor.
+      if ("space_floor_pct" in patch) refreshDisk();
       setMessage(
         res.applied_immediately
           ? "Saved."
@@ -191,9 +195,26 @@ export default function SettingsPage() {
                   min={0}
                   max={50}
                   defaultValue={settings.space_floor_pct}
-                  onBlur={(e) => save({ space_floor_pct: +e.target.value })}
+                  onBlur={(e) => {
+                    // Empty is not 0: clearing the box would switch every
+                    // recording safeguard off. 0 has to be typed.
+                    if (e.target.value.trim() === "") {
+                      e.target.value = String(settings.space_floor_pct);
+                      return;
+                    }
+                    if (+e.target.value !== settings.space_floor_pct) save({ space_floor_pct: +e.target.value });
+                  }}
+                  aria-describedby="space-floor-help"
                   className="input"
                 />
+                {disk && (
+                  <span id="space-floor-help" className="mt-1.5 block tabular-nums text-ink-faint">
+                    {disk.floor_pct > 0 ? `= ${fmtSize(disk.floor_bytes)} · ` : "Off · "}
+                    <span className={disk.below_floor ? "text-bad" : !disk.room_to_start ? "text-warn" : ""}>
+                      {disk.free_pct.toFixed(1)}% free now
+                    </span>
+                  </span>
+                )}
               </Field>
               <Field label="Poll interval (seconds)">
                 <input
@@ -205,6 +226,11 @@ export default function SettingsPage() {
                 />
               </Field>
             </div>
+            {/* "+ 2%" is RESUME_MARGIN_PCT in backend/app/services/storage.py. */}
+            <p className="text-xs text-ink-faint">
+              Below the space floor, running recordings stop and save and auto-downloads pause.
+              New recordings start again once the floor + 2% is free. 0 turns it off.
+            </p>
           </div>
         </section>
       )}

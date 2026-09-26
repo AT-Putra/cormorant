@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api } from "./api/client";
+import { DiskBanner, DiskMeter, StorageProvider } from "./components/DiskStatus";
 import { CormorantMark } from "./components/Logo";
 import Queue from "./pages/Queue";
 import Watchlist from "./pages/Watchlist";
@@ -54,7 +55,7 @@ function Shell({ children, onLogout }: { children: React.ReactNode; onLogout: ()
     <div className="flex min-h-dvh flex-col">
       {/* Top bar */}
       <header className="sticky top-0 z-40 border-b border-line bg-surface/80 backdrop-blur-md">
-        <div className="mx-auto flex h-14 w-full max-w-6xl items-center gap-4 px-4 sm:px-6">
+        <div className="mx-auto flex h-14 w-full max-w-6xl items-center gap-3 px-4 sm:gap-4 sm:px-6">
           <NavLink to="/queue" className="group flex items-center gap-2.5">
             <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-accent to-accent-2 text-surface shadow-lg shadow-accent/20 transition-transform group-hover:scale-105">
               <CormorantMark className="h-[18px] w-[18px]" />
@@ -68,15 +69,18 @@ function Shell({ children, onLogout }: { children: React.ReactNode; onLogout: ()
             self-hosted
           </span>
 
-          <button
-            onClick={async () => {
-              await api.logout();
-              onLogout();
-            }}
-            className="ml-auto cursor-pointer rounded-lg px-3 py-1.5 text-sm text-ink-dim transition-colors hover:bg-surface-3 hover:text-ink"
-          >
-            Log out
-          </button>
+          <div className="ml-auto flex items-center gap-2 sm:gap-3">
+            <DiskMeter />
+            <button
+              onClick={async () => {
+                await api.logout();
+                onLogout();
+              }}
+              className="cursor-pointer rounded-lg px-3 py-1.5 text-sm text-ink-dim transition-colors hover:bg-surface-3 hover:text-ink"
+            >
+              Log out
+            </button>
+          </div>
         </div>
       </header>
 
@@ -109,6 +113,8 @@ function Shell({ children, onLogout }: { children: React.ReactNode; onLogout: ()
           ))}
         </nav>
       </div>
+
+      <DiskBanner />
 
       <main
         key={location.pathname}
@@ -181,17 +187,19 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      <Shell onLogout={() => setState("login")}>
-        <Routes>
-          <Route path="/" element={<Navigate to="/queue" replace />} />
-          <Route path="/queue" element={<Queue />} />
-          <Route path="/watchlist" element={<Watchlist />} />
-          <Route path="/library" element={<Library />} />
-          <Route path="/activity" element={<ActivityLog />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="*" element={<Navigate to="/queue" replace />} />
-        </Routes>
-      </Shell>
+      <StorageProvider>
+        <Shell onLogout={() => setState("login")}>
+          <Routes>
+            <Route path="/" element={<Navigate to="/queue" replace />} />
+            <Route path="/queue" element={<Queue />} />
+            <Route path="/watchlist" element={<Watchlist />} />
+            <Route path="/library" element={<Library />} />
+            <Route path="/activity" element={<ActivityLog />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="*" element={<Navigate to="/queue" replace />} />
+          </Routes>
+        </Shell>
+      </StorageProvider>
     </BrowserRouter>
   );
 }
