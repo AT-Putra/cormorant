@@ -21,6 +21,7 @@ fresh recording row, an offline room flips to 'ended'; manual origins flip to
 """
 
 import asyncio
+import glob
 import logging
 import os
 import signal
@@ -38,8 +39,15 @@ log = logging.getLogger(__name__)
 
 TERMINATE_GRACE_S = 10.0
 STOP_POLL_S = 0.2
-# How often the watchdog checks free space and looks for orphaned rows.
+# How often the watchdog checks free space and looks for orphaned rows and
+# stalled captures.
 WATCHDOG_S = 30.0
+# How long a running capture's files may go unchanged before it is called
+# stalled: its engine is blocked reading a connection that went quiet without
+# closing. Has to outlast the slowest start, where the extractor's requests
+# and the browser lane's 45s (browser.DEFAULT_TIMEOUT) all come before the
+# first byte.
+STALL_S = 180.0
 # A row is born before its supervisor: the poller commits it, then starts the
 # task. Anything younger than this may simply not have been handed over yet.
 ORPHAN_GRACE_S = 120.0
@@ -182,6 +190,24 @@ def captured_file(capture: Path) -> Path | None:
         if size > best_size:
             best, best_size = candidate, size
     return best
+
+
+def capture_bytes(capture: Path) -> int:
+    """Bytes on disk under every name an engine writes for this capture.
+
+    A sum over <stem>.*, not captured_file's larger of two names, because an
+    engine at work is not always growing the larger one. streamlink writes
+    <name> beside a bigger .part yt-dlp abandoned. yt-dlp's end-of-stream
+    fixup copies a finished HLS capture into <stem>.temp.flv while <name>
+    stands still. A split audio/video ladder lands in <name>.mp4.part.
+    """
+    total = 0
+    for sibling in capture.parent.glob(glob.escape(capture.stem) + ".*"):
+        try:
+            total += sibling.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def drop_part_suffix(path: Path) -> Path:
@@ -356,8 +382,13 @@ class RecorderSupervisor:
         # recording_id -> why a stop was ordered, persisted as the row's error
         # (a floor stop has to say so, or it reads as the host ending).
         self._reasons: dict[int, str] = {}
+        # recording_id -> the path its engines write to (stop_stalled).
+        self._captures: dict[int, Path] = {}
+        # recording_id -> (engine, bytes on disk, loop time they last changed)
+        self._progress: dict[int, tuple[asyncio.subprocess.Process, int, float]] = {}
         self._watchdogs: list[asyncio.Task] = []
         self.watchdog_s = WATCHDOG_S
+        self.stall_s = STALL_S
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -420,7 +451,7 @@ class RecorderSupervisor:
         return True
 
     async def start_watchdog(self) -> None:
-        """Begin the free-space and orphan checks (main.py lifespan).
+        """Begin the free-space, orphan and stall checks (main.py lifespan).
 
         Separate from start() because it has to come AFTER reconcile_on_boot:
         at boot every leftover 'recording' row is unsupervised, and those are
@@ -428,12 +459,14 @@ class RecorderSupervisor:
         """
         if any(not t.done() for t in self._watchdogs):
             return
-        # Two loops, not one: a reap can spend minutes remuxing a lost
+        # A loop each, not one: a reap can spend minutes remuxing a lost
         # capture, and a single loop sat in that remux while a running
-        # capture wrote on past the floor.
+        # capture wrote on past the floor. A stall stop waits out a grace
+        # window, which the floor check should not queue behind either.
         self._watchdogs = [
             asyncio.create_task(self._every(self.enforce_floor, "space floor check")),
             asyncio.create_task(self._every(self.reap_orphans, "orphan reap")),
+            asyncio.create_task(self._every(self.stop_stalled, "stall check")),
         ]
 
     async def _every(self, check, what: str) -> None:
@@ -496,6 +529,8 @@ class RecorderSupervisor:
             self._registry.pop(recording_id, None)
             self._intended.pop(recording_id, None)
             self._reasons.pop(recording_id, None)
+            self._captures.pop(recording_id, None)
+            self._progress.pop(recording_id, None)
             self._supervised.discard(recording_id)
 
     async def _supervise_inner(self, recording_id: int) -> None:
@@ -506,6 +541,7 @@ class RecorderSupervisor:
 
         out_path = recording_output_path(rec.platform, rec.creator, rec.started_at)
         capture_path = out_path.with_suffix(".flv")
+        self._captures[recording_id] = capture_path
         out_path.parent.mkdir(parents=True, exist_ok=True)
         # Claim the path before a byte is written. recovery decides a .part is
         # an orphan by checking it against the output_path of every active
@@ -712,10 +748,52 @@ class RecorderSupervisor:
             f"fell below the {status.floor_pct:g}% floor"
         )
         log.warning("%s; stopping %d capture(s)", reason, len(running))
+        await self._interrupt(running, reason, "floor")
+        return len(running)
+
+    async def stop_stalled(self) -> int:
+        """Stop and save every running capture whose files have stopped
+        changing. Returns how many were told to stop.
+
+        An engine blocked reading a stream that went quiet without closing
+        never exits, and a row with a live engine is nobody's orphan. On
+        2026-10-09 one capture took 37 minutes of a room that stayed live for
+        two hours, then sat in 'recording' for 44 more -- and the poller
+        skipped that creator's next two lives, because it saw a capture
+        already running. Stopped as 'interrupted', the row is out of the
+        poller's way: a watched room that is still live is picked up again
+        on the next sweep. A manual capture is not; its row says why it
+        stopped.
+        """
+        now = asyncio.get_running_loop().time()
+        stalled: list[int] = []
+        for rid, (proc, _task) in self._registry.items():
+            if proc is None or proc.returncode is not None or rid in self._intended:
+                continue
+            capture = self._captures.get(rid)
+            if capture is None:
+                continue
+            size = capture_bytes(capture)
+            seen = self._progress.get(rid)
+            # A new engine restarts the clock: the fallback has its own
+            # connection to open before it writes a byte.
+            if seen is None or seen[0] is not proc or seen[1] != size:
+                self._progress[rid] = (proc, size, now)
+            elif now - seen[2] >= self.stall_s:
+                stalled.append(rid)
+        if not stalled:
+            return 0
+        reason = f"stopped: no data arrived for {self.stall_s / 60:g} min"
+        log.warning("%s; stopping %d capture(s)", reason, len(stalled))
+        await self._interrupt(stalled, reason, "stall")
+        return len(stalled)
+
+    async def _interrupt(self, rids: list[int], reason: str, what: str) -> None:
+        """Stop these running captures as 'interrupted', all at once."""
 
         async def _stop(rid: int) -> None:
             # Gone since the snapshot: stop() would take it for an orphan and
-            # remux it inline, on a disk that is already short.
+            # remux it inline -- at the floor, on a disk that is already short.
             if rid not in self._registry:
                 return
             # 'interrupted', not 'ended': the host did not end it, and it is
@@ -723,14 +801,14 @@ class RecorderSupervisor:
             await self.stop(rid, reason=reason, as_status="interrupted")
 
         # Together: each stop can wait out a 15s grace, and one that raises
-        # must not leave the rest writing into the last of the disk.
+        # must not leave the rest running -- at the floor, writing into the
+        # last of the disk.
         results = await asyncio.gather(
-            *(_stop(rid) for rid in running), return_exceptions=True
+            *(_stop(rid) for rid in rids), return_exceptions=True
         )
-        for rid, result in zip(running, results):
+        for rid, result in zip(rids, results):
             if isinstance(result, BaseException):
-                log.error("floor stop failed for recording %s: %r", rid, result)
-        return len(running)
+                log.error("%s stop failed for recording %s: %r", what, rid, result)
 
     async def reap_orphans(self) -> int:
         """Finalize every 'recording' row that has no supervisor behind it.

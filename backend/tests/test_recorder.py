@@ -1176,7 +1176,7 @@ async def test_shutdown_cancels_the_watchdog(sup, db):
     sup.watchdog_s = 3600
     await sup.start_watchdog()
     loops = list(sup._watchdogs)
-    assert len(loops) == 2 and not any(t.done() for t in loops)
+    assert len(loops) == 3 and not any(t.done() for t in loops)
     await sup.start_watchdog()  # idempotent while running
     assert sup._watchdogs == loops
 
@@ -1213,6 +1213,189 @@ async def test_a_slow_reap_does_not_hold_up_the_floor(sup, db, monkeypatch):
 
     assert proc.signals == [signal.SIGINT]
     await asyncio.wait_for(asyncio.shield(task), timeout=5)
+
+
+async def test_a_capture_that_stops_growing_is_stopped_and_kept(sup, db, monkeypatch):
+    """The 2026-10-09 incident, replayed.
+
+    The engine blocked on a stream that went quiet, 37 minutes into a room
+    that stayed live for two hours. It never exited, so the row sat in
+    'recording' for 44 hours with its supervisor alive -- nothing for the
+    orphan reap to find -- and the poller skipped that creator's later lives.
+    """
+    proc = stoppable(monkeypatch, "stall.mp4")
+    part = _media_root() / "stall.flv.part"
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_bytes(b"x" * 1000)
+    rid = await make_recording(db)()
+    task = sup.start_recording(rid)
+    await engine_up(sup, rid)
+    sup.stall_s = 0
+
+    assert await sup.stop_stalled() == 0  # first sighting: the clock starts
+    assert await sup.stop_stalled() == 1
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+
+    assert proc.signals == [signal.SIGINT]  # the graceful stop, not a kill
+    rec = await fetch(db, rid)
+    assert rec.status == "interrupted"  # no longer in the poller's way
+    assert rec.error == "stopped: no data arrived for 0 min"
+    mp4 = _media_root() / "stall.mp4"
+    assert rec.output_path == str(mp4)
+    assert mp4.read_bytes() == b"x" * 1000
+
+
+@pytest.mark.parametrize(
+    "growing",
+    [
+        "grow.flv.part",  # yt-dlp, mid-capture
+        "grow.flv",  # streamlink, the fallback, beside an abandoned .part
+        "grow.temp.flv",  # yt-dlp's end-of-stream fixup of an HLS capture
+        "grow.flv.mp4.part",  # a split audio/video ladder being merged
+    ],
+)
+async def test_a_capture_growing_under_any_of_its_names_is_left_alone(
+    sup, db, monkeypatch, growing
+):
+    """Each of these is an engine at work, and only the first two are names
+    captured_file looks at. The .part is the larger file throughout, so
+    watching the larger of those two would call the other three a stall."""
+    proc = stoppable(monkeypatch, "grow.mp4")
+    root = _media_root()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "grow.flv.part").write_bytes(b"x" * 1000)
+    rid = await make_recording(db)()
+    task = sup.start_recording(rid)
+    await engine_up(sup, rid)
+    sup.stall_s = 0
+
+    assert await sup.stop_stalled() == 0
+    (root / growing).write_bytes(b"y" * 10)
+    assert await sup.stop_stalled() == 0
+    (root / growing).write_bytes(b"y" * 20)
+    assert await sup.stop_stalled() == 0
+
+    assert proc.signals == []
+    assert await sup.stop(rid) is True
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+
+
+async def test_a_quiet_capture_is_given_the_whole_stall_window(sup, db, monkeypatch):
+    proc = stoppable(monkeypatch, "window.mp4")
+    rid = await make_recording(db)()
+    task = sup.start_recording(rid)
+    await engine_up(sup, rid)
+
+    def quiet_for(seconds: float) -> None:
+        engine, size, _since = sup._progress[rid]
+        since = asyncio.get_running_loop().time() - seconds
+        sup._progress[rid] = (engine, size, since)
+
+    assert await sup.stop_stalled() == 0  # first sighting: the clock starts
+    quiet_for(rec_mod.STALL_S - 1)
+    assert await sup.stop_stalled() == 0
+    assert proc.signals == []
+    quiet_for(rec_mod.STALL_S + 1)
+    assert await sup.stop_stalled() == 1
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+
+    assert (await fetch(db, rid)).error == "stopped: no data arrived for 3 min"
+
+
+async def test_an_engine_that_has_exited_is_not_stalled(sup, db, monkeypatch):
+    """The supervisor's own remux can outlast the stall window, and nothing
+    the engine wrote grows while it runs. That is a finished capture being
+    filed, not a quiet stream."""
+    out = pin_out(monkeypatch, "done.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.with_suffix(".flv").write_bytes(b"x" * 100)
+    script_spawns(monkeypatch, [FakeProc(exit_code=0)])
+    remuxing, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_remux(src, dst):
+        remuxing.set()
+        await release.wait()
+        dst.write_bytes(src.read_bytes())
+        return True
+
+    monkeypatch.setattr(rec_mod, "remux_to_mp4", slow_remux)
+    rid = await make_recording(db)()
+    task = sup.start_recording(rid)
+    await asyncio.wait_for(remuxing.wait(), timeout=5)
+    sup.stall_s = 0
+
+    assert await sup.stop_stalled() == 0
+    assert await sup.stop_stalled() == 0
+
+    release.set()
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+    assert (await fetch(db, rid)).status == "finished"
+
+
+async def test_a_capture_already_being_stopped_is_not_stopped_again(sup, db, monkeypatch):
+    proc = FakeProc(delay=999)  # sits through SIGINT; only the kill ends it
+    pin_out(monkeypatch, "stopping.mp4")
+    script_spawns(monkeypatch, [proc])
+    monkeypatch.setattr(rec_mod, "_kill_tree", lambda pid: setattr(proc, "_delay", 0.0))
+    rid = await make_recording(db)()
+    task = sup.start_recording(rid)
+    await engine_up(sup, rid)
+    sup.stall_s = 0
+    sup.grace_s = 0.5
+    stopping = asyncio.create_task(sup.stop(rid))
+    for _ in range(500):
+        if proc.signals:
+            break
+        await asyncio.sleep(0.01)
+
+    assert await sup.stop_stalled() == 0
+    assert await sup.stop_stalled() == 0
+
+    assert await asyncio.wait_for(stopping, timeout=5) is True
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+    assert proc.signals == [signal.SIGINT]
+    assert (await fetch(db, rid)).status == "ended"  # the user's stop, not a stall
+
+
+async def test_the_fallback_engine_gets_a_stall_clock_of_its_own(sup, db, monkeypatch):
+    first = FakeProc(pid=1, exit_code=1, delay=999)
+    second = FakeProc(pid=2, delay=999)
+    second.on_signal = lambda sig: setattr(second, "_delay", 0.0)
+    pin_out(monkeypatch, "chain.mp4")
+    script_spawns(monkeypatch, [first, second])
+    monkeypatch.setattr(rec_mod, "_kill_tree", lambda pid: setattr(second, "_delay", 0.0))
+    rid = await make_recording(db)()
+    task = sup.start_recording(rid)
+    await engine_up(sup, rid, first)
+    sup.stall_s = 0
+    assert await sup.stop_stalled() == 0  # the clock starts on the first engine
+
+    first._delay = 0.0  # yt-dlp gives up; streamlink takes over
+    await engine_up(sup, rid, second)
+
+    assert await sup.stop_stalled() == 0  # not the first engine's silence
+    assert second.signals == []
+    assert await sup.stop(rid) is True
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+
+
+async def test_the_watchdog_runs_the_stall_check(sup, db, monkeypatch):
+    proc = stoppable(monkeypatch, "wired.mp4")
+    rid = await make_recording(db)()
+    task = sup.start_recording(rid)
+    await engine_up(sup, rid)
+    sup.stall_s = 0
+    sup.watchdog_s = 0.01
+    await sup.start_watchdog()
+
+    await asyncio.wait_for(asyncio.shield(task), timeout=5)
+    # Before the db fixture goes: the reap loop queries it every 10ms.
+    await sup.shutdown()
+
+    assert proc.signals == [signal.SIGINT]
+    rec = await fetch(db, rid)
+    assert rec.status == "interrupted"
+    assert rec.error == "stopped: no data arrived for 0 min"
 
 
 async def test_a_capture_the_disk_cannot_hold_twice_is_kept_as_flv(sup, db, monkeypatch):
