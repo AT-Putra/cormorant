@@ -64,8 +64,65 @@ def test_explicit_format_id_beats_the_default_cap():
     """A quality picked in the dropdown names the exact stream; a cap on top
     could only fight it."""
     opts = build_opts(_job(format_id="100028", selected_quality="360p"))
-    assert opts["format"] == "100028"
+    assert opts["format"] == "100028+bestaudio/100028"
     assert "format_sort" not in opts
+
+
+# ---- picked format -> audio -------------------------------------------------
+
+
+def _select(spec: str, formats: list[dict]) -> list[str]:
+    """Format ids yt-dlp's real selector lands on for `spec`, offline."""
+    from yt_dlp import YoutubeDL
+
+    info = {
+        "id": "x", "title": "t", "extractor": "test", "extractor_key": "Test",
+        "webpage_url": "https://example.invalid/x",
+        "formats": [{"url": f"https://example.invalid/{f['format_id']}", **f} for f in formats],
+    }
+    with YoutubeDL({"format": spec, "quiet": True, "simulate": True}) as ydl:
+        got = ydl.process_ie_result(info, download=False)
+    return [f["format_id"] for f in got.get("requested_formats") or [got]]
+
+
+_VIDEO_ONLY = {"format_id": "30112", "ext": "mp4", "vcodec": "avc1", "acodec": "none"}
+_AUDIO_ONLY = {"format_id": "30280", "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2"}
+_COMBINED = {"format_id": "h264_540p", "ext": "mp4", "vcodec": "h264", "acodec": "aac"}
+
+
+def test_picked_video_only_format_gets_audio():
+    """bilibili's ladder is all video-only DASH: job 13 picked 100035 and
+    landed as an h264 file with no audio track."""
+    spec = build_opts(_job(format_id="30112"))["format"]
+    assert _select(spec, [_VIDEO_ONLY, _AUDIO_ONLY]) == ["30112", "30280"]
+
+
+def test_picked_format_with_its_own_audio_is_not_doubled():
+    spec = build_opts(_job(format_id="h264_540p"))["format"]
+    assert _select(spec, [_COMBINED, _AUDIO_ONLY]) == ["h264_540p"]
+
+
+def test_picked_format_survives_a_ladder_with_no_audio_only_formats():
+    """TikTok-style ladders are all muxed; "+bestaudio" alone selects nothing
+    there and the download would fail with "requested format not available"."""
+    spec = build_opts(_job(format_id="h264_540p"))["format"]
+    assert _select(spec, [_COMBINED]) == ["h264_540p"]
+
+
+def test_picked_audio_only_format_stays_audio_only():
+    spec = build_opts(_job(format_id="30280"))["format"]
+    assert _select(spec, [_VIDEO_ONLY, _AUDIO_ONLY]) == ["30280"]
+
+
+def test_no_global_chunk_size():
+    """The global param outranks the bilibili plugin's per-format value and
+    would put bounded ranges on live FLV streams too."""
+    assert "http_chunk_size" not in build_opts(_job())
+
+
+def test_a_full_selector_passes_through_untouched():
+    """The probe's best_format_id can already be a merge ("137+140")."""
+    assert build_opts(_job(format_id="137+140"))["format"] == "137+140"
 
 
 def test_settings_default_applies_when_job_has_no_snapshot():

@@ -82,6 +82,23 @@ def quality_sort(quality: str | None) -> list[str] | None:
     return [f"res:{digits}"] if digits.isdigit() else None
 
 
+def format_spec(format_id: str | None) -> str:
+    """The yt-dlp format selector for a job's (optional) picked format.
+
+    A quality picked in the dropdown is a single format id, and on bilibili
+    every video id is a video-only DASH stream: job 13 (format 100035) landed
+    as an h264 file with no audio track at all. "+bestaudio" adds the sound.
+    yt-dlp drops that extra audio when the picked format already carries its
+    own, and the "/<id>" fallback covers platforms with no audio-only formats,
+    where "+bestaudio" selects nothing and the merge with it.
+    """
+    if not format_id:
+        return "bestvideo*+bestaudio/best"
+    if "+" in format_id or "/" in format_id:
+        return format_id  # already a full selector; leave it alone
+    return f"{format_id}+bestaudio/{format_id}"
+
+
 def _sanitize(component: str) -> str:
     return component.strip().replace("/", "_").replace("\\", "_") or "_"
 
@@ -144,7 +161,7 @@ def build_opts(job, settings: dict | None = None, *, extra: dict | None = None) 
         name = "%(title).120B.%(ext)s"
     opts: dict[str, Any] = {
         "http_headers": dict(HTTP_HEADERS),
-        "format": getattr(job, "format_id", None) or "bestvideo*+bestaudio/best",
+        "format": format_spec(getattr(job, "format_id", None)),
         "merge_output_format": s.get("container", "mp4"),
         "outtmpl": str(output_dir(job, s) / name),
         "writethumbnail": True,
