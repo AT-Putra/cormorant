@@ -1,5 +1,9 @@
 # ---- Stage 1: frontend build (node 26, LTS from Oct 2026) ----
-FROM node:26-slim AS frontend
+# Pinned to a patch release, not the floating 26-slim tag, so a security fix
+# is a visible bump here rather than whatever the build cache last pulled.
+# 26.12.1 carries the October 21, 2026 fixes (CVE-2026-111497, Brotli RCE).
+# Node only builds the static bundle; the runtime stage below has no node.
+FROM node:26.12.1-slim AS frontend
 WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
