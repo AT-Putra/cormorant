@@ -44,9 +44,9 @@ FROM python:3.14-slim AS runtime
 # filename is a bare release (ffmpeg-n9.0.2-...) over a master snapshot
 # (ffmpeg-n9.0.1-84-g...): both are 9.0 branch, but the release is what
 # ffmpeg.org tagged.
-ARG FFMPEG_RELEASE=autobuild-2026-09-19-13-11
-ARG FFMPEG_BUILD=ffmpeg-n9.0.2-linux64-gpl-9.0
-ARG FFMPEG_SHA256=c67af56466837059601a1abd22109b7b771eeea137c9ff4b1db0bde66192dbc6
+ARG FFMPEG_RELEASE=autobuild-2026-10-22-13-06
+ARG FFMPEG_BUILD=ffmpeg-n9.0.2-33-g4cf298e66a-linux64-gpl-9.0
+ARG FFMPEG_SHA256=1cb0a72cf393a1fdb661cbbbd0cfe89dc8b197bb21e21473bbde505bb4f2a2a7
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
     && curl -fsSL -o /tmp/ffmpeg.tar.xz \
