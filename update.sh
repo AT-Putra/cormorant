@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Server-side update: fetch compose/env changes, pull the image CI built, swap
-# the container. Named volumes are untouched by recreation, so the SQLite DB,
-# the Fernet key and the yt-dlp venv updated from the UI all survive this.
+# Server-side update: fetch compose/env changes, pull the image CI built, bring
+# the venv on vd_config to that image's package versions, swap the container.
+# Recreation leaves named volumes alone, so the SQLite DB and the Fernet key
+# survive this, and sync-venv.sh keeps a yt-dlp the UI made newer.
 #
 #   ./update.sh              # move to whatever :latest now points at
 #   TAG=<git-sha> ./update.sh  # pin/roll back to one build
@@ -10,6 +11,9 @@ cd "$(dirname "$0")"
 
 git pull --ff-only
 docker compose pull
+# Before `up`, not after: the old container keeps serving while pip runs, and
+# a failed sync stops here with that container still up.
+./sync-venv.sh
 docker compose up -d
 
 # Don't report success on a container that came up and fell over: the app's own

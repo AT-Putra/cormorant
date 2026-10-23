@@ -39,8 +39,10 @@ Same compose file as dev — plain Compose Spec, no engine-specific extensions.
 TAG=<git-sha> ./update.sh      # pin or roll back to one build
 ```
 
-Volumes are not touched by container recreation: the SQLite DB, the Fernet key
-and any yt-dlp version installed from the UI all survive an update.
+Volumes are not touched by container recreation: the SQLite DB and the Fernet
+key survive an update. The venv on `vd_config` hides the image's own, so
+`update.sh` runs `sync-venv.sh` first to install the image's package versions
+into it. A yt-dlp installed from the UI that is newer than the image's is kept.
 
 ## Volume layout (named volumes)
 
