@@ -105,8 +105,11 @@ async def ytdlp_update(session: AsyncSession = Depends(get_session)):
 
     try:
         before = await _run_fresh_version()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=f"version probe failed: {exc}")
+    except RuntimeError:
+        # A pip run that died halfway can leave no yt-dlp metadata at all, and
+        # the pip below is what puts it back: don't refuse the one button that
+        # can repair it.
+        before = None
 
     def _pip():
         return subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -119,7 +122,10 @@ async def ytdlp_update(session: AsyncSession = Depends(get_session)):
         raise HTTPException(status_code=500, detail=f"pip failed: {result.stderr[-400:]}")
 
     # pip -U is a no-op when current; only recycle the process on a real bump.
-    after = await _run_fresh_version()
+    try:
+        after = await _run_fresh_version()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=f"version probe failed: {exc}")
     if after == before:
         return {"updated": False, "restarting": False, "version": after}
 

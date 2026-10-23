@@ -98,13 +98,19 @@ WORKDIR /app
 # App-owned venv ON the config volume mount point so runtime pip -U persists
 # (Decision C: yt-dlp self-update as non-root). Seed it now; the volume's
 # copy-on-first-use carries it into a fresh named volume.
+#
+# The chown runs after the LAST install, in the same layer. It used to run
+# before the requirements install, which left every package root-owned: the
+# UI's pip (as vduser) could rename yt_dlp aside but not delete it, died on
+# Errno 13 halfway, and left the venv with no yt-dlp at all. A volume seeded
+# by an older image keeps that ownership; fix it once with
+# `docker exec -u root cormorant chown -R vduser:vduser /config/venv`.
 ENV VENV=/config/venv
+COPY backend/requirements.txt /app/backend/requirements.txt
 RUN python -m venv $VENV \
     && $VENV/bin/pip install --no-cache-dir --upgrade pip \
+    && $VENV/bin/pip install --no-cache-dir -r /app/backend/requirements.txt \
     && chown -R vduser:vduser /config
-
-COPY backend/requirements.txt /app/backend/requirements.txt
-RUN $VENV/bin/pip install --no-cache-dir -r /app/backend/requirements.txt
 
 COPY backend/ /app/backend/
 COPY --from=frontend /build/dist /app/frontend/dist

@@ -167,6 +167,36 @@ def test_update_no_change_skips_restart(authed_client, monkeypatch):
     assert r.json() == {"updated": False, "restarting": False, "version": "9.9.9"}
 
 
+def test_update_repairs_missing_install(authed_client, monkeypatch):
+    """Prod, 2026-10-23: a pip run that died on Errno 13 left yt_dlp renamed to
+    ~t_dlp and no metadata behind. The pre-pip probe then raised, and the
+    endpoint refused to run the pip that would have put it back."""
+    client, _ = authed_client
+
+    class FakeResult:
+        returncode = 0
+        stderr = ""
+
+    pip_calls = []
+    monkeypatch.setattr(
+        settings_mod.subprocess, "run", lambda *a, **k: pip_calls.append(a) or FakeResult()
+    )
+    probes = iter([RuntimeError("PackageNotFoundError: yt-dlp"), "2026.10.21"])
+
+    async def _missing_then_installed():
+        v = next(probes)
+        if isinstance(v, Exception):
+            raise v
+        return v
+
+    monkeypatch.setattr(settings_mod, "_run_fresh_version", _missing_then_installed)
+    monkeypatch.setattr(settings_mod.os, "kill", lambda *a, **k: None)
+    r = client.post("/api/settings/ytdlp/update")
+    assert r.status_code == 200, r.text
+    assert len(pip_calls) == 1
+    assert r.json() == {"updated": True, "restarting": True, "version": "2026.10.21"}
+
+
 def test_update_pip_failure(authed_client, monkeypatch):
     client, _ = authed_client
 
