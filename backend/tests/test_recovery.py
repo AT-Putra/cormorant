@@ -22,6 +22,22 @@ def test_claimed_paths_covers_part_and_ytdl_siblings():
     assert "/media/bili/c/live_1.mp4.ytdl" in claimed
 
 
+def test_a_merged_download_claims_its_other_streams_too():
+    """Claimed by the video stream's name, the job fails on the audio's."""
+    jobs = [SimpleNamespace(output_path="/media/bili/c/T.f30112.mp4")]
+    claimed = rec.claimed_paths(jobs, [])
+    audio = "/media/bili/c/T.f30280.m4a.part"
+    assert any(audio.startswith(c) for c in claimed)
+    other = "/media/bili/c/Other.f30280.m4a.part"
+    assert not any(other.startswith(c) for c in claimed)
+
+
+def test_a_cancelled_job_claims_nothing():
+    """Cancel gave the bytes up; hiding them from the sweep would strand them."""
+    jobs = [SimpleNamespace(output_path="/media/bili/c/T.mp4", error="cancelled")]
+    assert rec.claimed_paths(jobs, []) == set()
+
+
 def test_orphan_candidates_finds_parts_only(tmp_path):
     (tmp_path / "a.flv.part").write_bytes(b"x")
     (tmp_path / "b.mp4").write_bytes(b"x")  # not a part
@@ -337,15 +353,18 @@ def _seed_job(status: str, output_path: str | None):
     asyncio.run(_go())
 
 
-def test_a_paused_jobs_capture_is_not_collected_as_an_orphan(
-    media_root, monkeypatch
+@pytest.mark.parametrize("status", ["paused", "failed"])
+def test_a_resumable_jobs_capture_is_not_collected_as_an_orphan(
+    media_root, monkeypatch, status
 ):
-    """Pause keeps the .part on disk so Resume can continue it.
+    """Pause keeps the .part on disk so Resume can continue it, and a failed
+    job keeps it so Retry can.
 
     The sweep only shielded queued/probing/downloading jobs, so a paused one
     claimed nothing: its capture was collected as abandoned, remuxed away and
     its source deleted, leaving Resume with nothing to continue from. Caught
     with 1.9 GB of paused live captures one sweep away from exactly that.
+    Failed jobs stayed exposed until job 19 lost its 63 MB .part that way.
     """
     root: Path = media_root
     paused_dir = root / "tiktok" / "someone"
@@ -359,7 +378,7 @@ def test_a_paused_jobs_capture_is_not_collected_as_an_orphan(
     orphan.write_bytes(bytes(64))
 
     # The job claims the name it is writing, minus the .part suffix.
-    _seed_job("paused", str(paused_dir / "T.mp4"))
+    _seed_job(status, str(paused_dir / "T.mp4"))
 
     async def instant_true(_path):
         return True
@@ -370,7 +389,7 @@ def test_a_paused_jobs_capture_is_not_collected_as_an_orphan(
     n = asyncio.run(rec.recovery.sweep_once())
 
     assert n == 1  # the real orphan, and only it
-    assert resumable.is_file(), "swept a paused job's capture out from under it"
+    assert resumable.is_file(), f"swept a {status} job's capture out from under it"
     assert not (paused_dir / "T_recovered.mp4").exists()
     assert not orphan.exists()  # genuinely abandoned, so collected as before
 

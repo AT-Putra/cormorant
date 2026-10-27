@@ -14,6 +14,7 @@ be stable across two checks. Runs at boot and every SWEEP_INTERVAL_S.
 
 import asyncio
 import logging
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -22,13 +23,24 @@ from sqlalchemy import select
 
 from app import models
 from app.services import events, storage
-from app.services.downloader import TERMINAL
 from app.services.recorder import mp4_copy_args
 from app.services.ytdlp import _sanitize
 
 log = logging.getLogger(__name__)
 
 SWEEP_INTERVAL_S = 600  # 10 min
+# Jobs that are finished with their files. A FAILED job is not: Retry
+# resumes its .part. Shielding only unsettled jobs let the sweep take job
+# 19's 63 MB .part 90 s after a CDN failure, register it as a "(recovered)"
+# library item and delete it, so the next Retry started again from byte 0
+# -- and every sweep after logged "already in the library; leaving .part
+# for cleanup". A failed live capture is collected once Delete drops the
+# row, or once a Retry claims a new file (a room that is offline by then
+# writes none, so it waits for Delete). Cancelled jobs claim nothing; see
+# claimed_paths.
+SETTLED_JOBS = ("done", "skipped")
+# yt-dlp names each stream of a merged download <title>.f<format_id>.<ext>.
+_FORMAT_SUFFIX = re.compile(r"\.f[^./\\]+\.[^./\\]+$")
 # Size must be identical after this long before we consider the file dead.
 STABLE_WINDOW_S = 90
 ffmpeg = "ffmpeg"
@@ -51,11 +63,20 @@ def claimed_paths(job_rows, rec_rows) -> set[str]:
     collected a paused capture as an orphan, remuxed it away and deleted the
     source, and Resume then had nothing to continue from. Measured with 1.9 GB
     of paused live captures sitting one sweep away from exactly that.
+
+    A cancelled job gave its bytes up, so it claims nothing and they are
+    collected as before; cancelling a job that was not running leaves its
+    .part behind, and shielding it would hide that space forever.
+
+    A merged download claims the name of the first stream it wrote
+    (<title>.f30112.mp4), but fails just as often on the next one
+    (<title>.f30280.m4a.part), so it claims the shared <title>. prefix too.
     """
     claimed: set[str] = set()
     for j in job_rows:
-        if j.output_path:
+        if j.output_path and getattr(j, "error", None) != "cancelled":
             claimed.add(j.output_path)
+            claimed.add(_FORMAT_SUFFIX.sub(".", j.output_path))
     for r in rec_rows:
         if r.output_path:
             claimed.add(r.output_path)
@@ -281,7 +302,7 @@ class RecoveryService:
                 (
                     await session.execute(
                         select(models.DownloadJob).where(
-                            models.DownloadJob.status.notin_(TERMINAL)
+                            models.DownloadJob.status.notin_(SETTLED_JOBS)
                         )
                     )
                 )

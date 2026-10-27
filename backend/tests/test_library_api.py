@@ -139,6 +139,36 @@ def test_stream_spans_many_chunks_without_buffering_the_file(client):
     assert r.content == payload
 
 
+def test_stream_gives_back_its_db_connection_before_the_bytes(client, monkeypatch):
+    """A download can take minutes, and a download manager opens several
+    ranges at once. Each one that held its pooled connection until the last
+    byte took a slot from a pool of 15, which on prod ran out mid-download
+    ("QueuePool limit of size 5 overflow 10 reached") and failed every other
+    DB user after its 30 s wait."""
+    from app.routers import library
+
+    c, db, tmp = client
+    iid = _seed_item(db, tmp)
+    real = library._iter_file_range
+    order = []
+
+    async def tracked_session():
+        async with db.async_session() as s:
+            yield s
+        order.append("session closed")
+
+    async def watching(path, span):
+        order.append("first byte")
+        async for chunk in real(path, span):
+            yield chunk
+
+    monkeypatch.setattr(library, "_iter_file_range", watching)
+    monkeypatch.setitem(c.app.dependency_overrides, library.get_session, tracked_session)
+    r = c.get(f"/api/library/{iid}/stream?download=1")
+    assert r.status_code == 200
+    assert order == ["session closed", "first byte"]
+
+
 async def test_iter_file_range_never_materialises_the_whole_span(tmp_path):
     """The point of the rewrite is the memory, and the test above cannot see
     it -- a buffered read returns the same correct bytes. Assert the property

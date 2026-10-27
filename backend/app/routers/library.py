@@ -92,7 +92,11 @@ async def stream_item(
     item_id: int,
     request: Request,
     download: bool = False,
-    session: AsyncSession = Depends(get_session),
+    # scope="function": a yield dependency otherwise closes only after the
+    # response is sent, and this response can stream for minutes, holding a
+    # pooled connection the whole time. See the pool test in
+    # test_library_api.
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> Response:
     """Manual range-capable file server so <video> can seek.
 
