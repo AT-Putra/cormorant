@@ -88,6 +88,9 @@ async def probe_url(
     # asked the same question, or it marks a tier the download will not take.
     settings = await aget_settings(session)
     sort = ytdlp.quality_sort(settings.default_quality)
+    # That read began a transaction, and the probe can take a minute: give
+    # the pooled connection back rather than sit on one of the 15 for it.
+    await session.close()
     try:
         info = await asyncio.to_thread(
             functools.partial(

@@ -150,6 +150,37 @@ def test_update_idle_pip_success(authed_client, monkeypatch):
     assert r.json() == {"updated": True, "restarting": True, "version": "2.0.0"}
 
 
+def test_update_gives_back_its_db_connection_before_pip(authed_client, monkeypatch):
+    """pip can run for up to 600 s; the idle check's transaction must not
+    hold a pooled connection through it."""
+    from tests.conftest import current_db
+
+    client, _ = authed_client
+    sessions, in_tx = [], []
+
+    async def tracked_session():
+        async with current_db().async_session() as s:
+            sessions.append(s)
+            yield s
+
+    class FakeResult:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(*a, **k):
+        in_tx.append(sessions[0].in_transaction())
+        return FakeResult()
+
+    monkeypatch.setattr(settings_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(settings_mod, "_run_fresh_version", _constant("9.9.9"))
+    monkeypatch.setitem(
+        client.app.dependency_overrides, settings_mod.get_session, tracked_session
+    )
+    r = client.post("/api/settings/ytdlp/update")
+    assert r.status_code == 200, r.text
+    assert in_tx == [False]
+
+
 def test_update_no_change_skips_restart(authed_client, monkeypatch):
     client, _ = authed_client
 

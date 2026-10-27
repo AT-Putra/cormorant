@@ -62,6 +62,30 @@ def test_probe_filters_and_sorts_formats(client, monkeypatch):
     assert (f137["vcodec"], f137["acodec"], f137["fps"]) == ("avc1.640028", "none", 30)
 
 
+def test_probe_gives_back_its_db_connection_before_probing(client, monkeypatch):
+    """The settings read opens a transaction; a probe can take a minute, and
+    a pool of 15 does not survive many of those held open at once."""
+    from tests.conftest import current_db
+
+    c, _, dl = client
+    sessions, in_tx = [], []
+
+    async def tracked_session():
+        async with current_db().async_session() as s:
+            sessions.append(s)
+            yield s
+
+    def probe(url, cookiefile=None, **kw):
+        in_tx.append(sessions[0].in_transaction())
+        return _probe_info()
+
+    monkeypatch.setattr(dl.ytdlp, "probe", probe)
+    monkeypatch.setitem(c.app.dependency_overrides, dl.get_session, tracked_session)
+    r = c.post("/api/downloads/probe", json={"url": "https://www.bilibili.com/video/BV1xx411c7XX"})
+    assert r.status_code == 200
+    assert in_tx == [False]
+
+
 def test_probe_reports_what_best_available_resolves_to(client, monkeypatch):
     """The dropdown marks a row as best; the backend decides which one."""
     c, _stub, dl = client

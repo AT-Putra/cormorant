@@ -96,6 +96,9 @@ async def is_engine_busy(session: AsyncSession) -> bool:
 async def ytdlp_update(session: AsyncSession = Depends(get_session)):
     if await is_engine_busy(session):
         raise HTTPException(status_code=409, detail="deferred_until_idle")
+    # Done with the database. pip can run for up to 600 s, and the read above
+    # would otherwise hold its pooled connection for all of it.
+    await session.close()
 
     venv_pip = CONFIG_DIR / "venv" / "bin" / "pip"
     if venv_pip.exists():
