@@ -228,6 +228,59 @@ def test_engine_chain_hands_cookies_to_both_engines():
     assert sl_cmd[-3:] == ["best", "-o", "/tmp/o.mp4"]
 
 
+def test_an_instagram_live_is_recorded_from_its_manifest_by_streamlink_alone():
+    """ffmpeg cannot read instagram's live manifest (exit 251, see
+    instagram_dash), so the yt-dlp lane would only fail first."""
+    chain = engine_chain(
+        "https://www.instagram.com/u/live", "/tmp/o.flv", "/tmp/ck.txt", None,
+        ("https://cdn.example/live.mpd?sig=1", "UA/1"),
+    )
+    assert len(chain) == 1
+    (cmd,) = chain
+    assert cmd[0] == "streamlink"
+    assert cmd[-4:] == ["dash://https://cdn.example/live.mpd?sig=1", "best", "-o", "/tmp/o.flv"]
+    assert cmd[cmd.index("--ffmpeg-fout") + 1] == "flv"
+    assert "User-Agent=UA/1" in cmd
+
+
+def test_instagram_dash_reads_the_manifest_off_the_live_probe(monkeypatch):
+    live = {"is_live": True, "formats": [
+        {"format_id": "dash-hd-v", "manifest_url": "https://cdn.example/l.mpd",
+         "http_headers": {"User-Agent": "UA/1"}},
+    ]}
+    monkeypatch.setattr(rec_mod.ytdlp, "probe", lambda url, cookiefile=None, **kw: live)
+    assert rec_mod.instagram_dash("https://www.instagram.com/u/live") == (
+        "https://cdn.example/l.mpd", "UA/1")
+
+    monkeypatch.setattr(rec_mod.ytdlp, "probe", lambda url, cookiefile=None, **kw: {"is_live": False})
+    with pytest.raises(RuntimeError, match="not live"):
+        rec_mod.instagram_dash("https://www.instagram.com/u/live")
+
+
+async def test_supervise_records_an_instagram_live_through_its_manifest(sup, db, monkeypatch):
+    out = pin_out(monkeypatch, "ig.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    spawned = script_spawns(monkeypatch, [FakeProc(exit_code=0)])
+    monkeypatch.setattr(
+        rec_mod, "instagram_dash", lambda url, cookiefile=None: ("https://cdn.example/l.mpd", "UA")
+    )
+    real_spawn = rec_mod.asyncio.create_subprocess_exec
+
+    async def spawn_touch(*cmd, **kwargs):
+        out.with_suffix(".flv").write_bytes(b"0" * 128)
+        return await real_spawn(*cmd, **kwargs)
+
+    monkeypatch.setattr(rec_mod.asyncio, "create_subprocess_exec", spawn_touch)
+    rid = await make_recording(
+        db, room_url="https://www.instagram.com/u/live", platform="instagram", creator="u"
+    )()
+    await asyncio.wait_for(sup.start_recording(rid), timeout=5)
+
+    assert [c[0] for c in spawned] == ["streamlink"]
+    assert "dash://https://cdn.example/l.mpd" in spawned[0]
+    assert (await fetch(db, rid)).status == "finished"
+
+
 def test_filename_embeds_started_at_no_collision():
     t1 = datetime(2026, 8, 24, 9, 30, 0)
     p1 = recording_output_path("bilibili", "c1", t1)
@@ -802,6 +855,31 @@ async def test_supervise_fallback_to_streamlink_on_failure(sup, db, monkeypatch)
     assert [c[0] for c in spawned] == [rec_mod.sys.executable, "streamlink"]
     rec = await fetch(db, rid)
     assert rec.status == "finished"
+
+
+async def test_a_capture_whose_last_engine_fails_is_kept(sup, db, monkeypatch):
+    """streamlink is instagram's only engine; a CDN error ending hours of
+    capture non-zero used to leave the remuxed file where nothing looks."""
+    out = pin_out(monkeypatch, "kept.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    script_spawns(monkeypatch, [FakeProc(exit_code=1), FakeProc(exit_code=1)])
+    real_spawn = rec_mod.asyncio.create_subprocess_exec
+
+    async def spawn_touch(*cmd, **kwargs):
+        out.with_suffix(".flv").write_bytes(b"0" * 128)
+        return await real_spawn(*cmd, **kwargs)
+
+    monkeypatch.setattr(rec_mod.asyncio, "create_subprocess_exec", spawn_touch)
+    rid = await make_recording(db)()
+    await asyncio.wait_for(sup.start_recording(rid), timeout=5)
+
+    rec = await fetch(db, rid)
+    assert rec.status == "interrupted"
+    assert rec.output_path == str(out)
+    assert "exited with code 1" in rec.error
+    async with db.async_session() as s:
+        items = (await s.execute(select(models.LibraryItem))).scalars().all()
+    assert [i.file_path for i in items] == [str(out)]
 
 
 async def test_supervise_all_engines_fail_marks_failed(sup, db, monkeypatch):
@@ -1571,6 +1649,24 @@ async def test_record_live_endpoint(client, monkeypatch):
     assert body["id"] == 77 and body["status"] == "recording"
     assert body["platform"] == "bilibili"
     assert calls == [(R.room_url, "bilibili", "", "manual")]
+
+
+async def test_record_live_names_the_creator_from_a_handle_url(client, monkeypatch):
+    """A manual capture used to land in a nameless folder."""
+    c, rr = client
+    calls = []
+
+    async def fake_begin(url, platform, creator, *, origin):
+        calls.append((platform, creator))
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(rr, "begin_recording", fake_begin)
+    with pytest.raises(RuntimeError):
+        c.post(
+            "/api/downloads/record-live",
+            json={"url": "https://www.instagram.com/_hiyori_0203/live/?broadcast_id=1"},
+        )
+    assert calls == [("instagram", "_hiyori_0203")]
 
 
 async def test_record_live_bad_url_400(client):

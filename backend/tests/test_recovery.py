@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from app.services import recovery as rec
 
@@ -101,6 +102,139 @@ def _seed_recording(status: str, output_path: str | None):
             await s.commit()
 
     asyncio.run(_go())
+
+
+def _seed_kept_flv(root: Path) -> tuple[Path, int]:
+    """A finished recording the recorder kept as FLV, plus its library row."""
+    import app.db as db_mod
+    from app.models import LibraryItem, LiveRecording, utcnow
+
+    flv = root / "bilibili" / "c" / "live_1.flv"
+    flv.parent.mkdir(parents=True)
+    flv.write_bytes(b"F" * 64)
+
+    async def _go():
+        async with db_mod.async_session() as s:
+            item = LibraryItem(file_path=str(flv), thumbnail_path=None, platform="bilibili",
+                               creator="c", title="Live", media_type="recording", size_bytes=64)
+            s.add(item)
+            s.add(LiveRecording(platform="bilibili", room_url="https://live.bilibili.com/1",
+                                creator="c", origin="watchlist", status="finished",
+                                output_path=str(flv), started_at=utcnow()))
+            await s.commit()
+            return item.id
+
+    return flv, asyncio.run(_go())
+
+
+def _paths(item_id):
+    import app.db as db_mod
+    from app.models import LibraryItem, LiveRecording
+
+    async def _go():
+        async with db_mod.async_session() as s:
+            item = await s.get(LibraryItem, item_id)
+            recs = (await s.execute(select(LiveRecording.output_path))).scalars().all()
+            return item.file_path, list(recs)
+
+    return asyncio.run(_go())
+
+
+def _fake_remux(monkeypatch, calls):
+    async def remux(src, dst):
+        calls.append(src)
+        dst.write_bytes(b"M" * 80)
+        return True
+
+    monkeypatch.setattr(rec, "remux_to_mp4", remux)
+
+
+def test_a_kept_flv_becomes_an_mp4_once_there_is_room(media_root, monkeypatch):
+    """Item 250 stayed an unplayable FLV for two days with room to spare."""
+    flv, item_id = _seed_kept_flv(media_root)
+    calls = []
+    _fake_remux(monkeypatch, calls)
+    monkeypatch.setattr(rec, "_timeline_s", lambda p: 10788.75)
+    monkeypatch.setattr(rec.storage, "room_for_copy", _async_true)
+
+    assert asyncio.run(rec.convert_kept_flvs()) == 1
+    mp4 = flv.with_suffix(".mp4")
+    assert mp4.is_file() and not flv.exists()
+    assert _paths(item_id) == (str(mp4), [str(mp4)])
+
+
+def test_a_kept_flv_waits_while_there_is_no_room(media_root, monkeypatch):
+    flv, item_id = _seed_kept_flv(media_root)
+    calls = []
+    _fake_remux(monkeypatch, calls)
+
+    async def no_room(size):
+        return False
+
+    monkeypatch.setattr(rec.storage, "room_for_copy", no_room)
+    assert asyncio.run(rec.convert_kept_flvs()) == 0
+    assert calls == [] and flv.is_file()
+    assert _paths(item_id)[0] == str(flv)
+
+
+def test_a_short_mp4_is_thrown_away_and_not_retried(media_root, monkeypatch):
+    """The FLV is the only copy; it goes only for an MP4 of the same length."""
+    flv, item_id = _seed_kept_flv(media_root)
+    monkeypatch.setattr(rec, "_FLV_FAILED", set())
+    calls = []
+    _fake_remux(monkeypatch, calls)
+    monkeypatch.setattr(rec, "_timeline_s", lambda p: 100.0 if p.suffix == ".flv" else 60.0)
+    monkeypatch.setattr(rec.storage, "room_for_copy", _async_true)
+
+    assert asyncio.run(rec.convert_kept_flvs()) == 0
+    assert flv.is_file() and not flv.with_suffix(".mp4").exists()
+    assert _paths(item_id)[0] == str(flv)
+    asyncio.run(rec.convert_kept_flvs())
+    assert len(calls) == 1, "retried a conversion that already failed"
+
+
+def test_a_partial_mp4_from_a_cut_conversion_is_redone(media_root, monkeypatch):
+    """A restart mid-remux leaves live_1.mp4 behind; it must not block the
+    item forever."""
+    flv, item_id = _seed_kept_flv(media_root)
+    flv.with_suffix(".mp4").write_bytes(b"half")
+    calls = []
+    _fake_remux(monkeypatch, calls)
+    monkeypatch.setattr(rec, "_timeline_s", lambda p: 50.0)
+    monkeypatch.setattr(rec.storage, "room_for_copy", _async_true)
+
+    assert asyncio.run(rec.convert_kept_flvs()) == 1
+    assert calls == [flv]
+    assert flv.with_suffix(".mp4").read_bytes() == b"M" * 80
+
+
+def test_conversion_keeps_the_start_margin_free(media_root, monkeypatch):
+    """Down to the bare floor, a capture running beside it gets stopped."""
+    flv, _ = _seed_kept_flv(media_root)
+    asked = []
+
+    async def room(size):
+        asked.append(size)
+        return False
+
+    monkeypatch.setattr(rec.storage, "disk_usage", lambda *a: SimpleNamespace(total=100_000))
+    monkeypatch.setattr(rec.storage, "room_for_copy", room)
+    asyncio.run(rec.convert_kept_flvs())
+    assert asked == [64 + int(100_000 * rec.storage.RESUME_MARGIN_PCT / 100)]
+
+
+def test_timeline_is_read_off_the_last_progress_line(monkeypatch, tmp_path):
+    """Measured on item 250: header 02:57:26.63, packets to 02:59:48.75."""
+    stderr = ("  Duration: 02:57:26.63, start: 0.004000, bitrate: 3399 kb/s\n"
+              "frame=1 fps=0 time=00:00:01.00 bitrate=N/A\n"
+              "frame=323665 fps=25159 time=02:59:48.75 bitrate=N/A speed=839x\n")
+    monkeypatch.setattr(rec.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(stderr=stderr, returncode=0))
+    assert rec._timeline_s(tmp_path / "x.flv") == pytest.approx(10788.75)
+
+
+async def _async_true(*_a):
+    return True
 
 
 def test_recovery_announces_what_it_rescued(media_root, monkeypatch):

@@ -288,6 +288,21 @@ export default function Queue() {
     }
   }
 
+  async function recordLive() {
+    setError(null);
+    setBusy(true);
+    try {
+      await api.recordLive(url.trim());
+      setUrl("");
+      setProbe(null);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to start recording");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function action(job: DownloadJob, act: "pause" | "resume" | "cancel" | "retry") {
     try {
       await api.jobAction(job.id, act);
@@ -370,6 +385,14 @@ export default function Queue() {
               Audio only (MP3/M4A)
             </label>
             <div className="flex flex-col gap-2 sm:flex-row">
+              {/* The recorder is what turns a live into a recording, and for
+                  instagram it is the only lane that can: a download job runs
+                  ffmpeg on its manifest, which fails (exit 251). */}
+              {probe.is_live && (
+                <button onClick={recordLive} disabled={busy} className="btn-primary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-40">
+                  Record live
+                </button>
+              )}
               <button onClick={() => start(false)} disabled={busy} className="btn-primary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-40">
                 Download
               </button>

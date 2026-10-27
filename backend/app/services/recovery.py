@@ -19,11 +19,11 @@ import subprocess
 import time
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app import models
 from app.services import events, storage
-from app.services.recorder import mp4_copy_args
+from app.services.recorder import FFMPEG, mp4_copy_args, remux_to_mp4
 from app.services.ytdlp import _sanitize
 
 log = logging.getLogger(__name__)
@@ -268,6 +268,105 @@ def _find_thumb(media: Path) -> str | None:
     return None
 
 
+_TIME_RE = re.compile(r"time=(\d+):(\d+):([\d.]+)")
+# A conversion that failed is not retried until the next start: these files
+# run to gigabytes, and the sweep comes round every ten minutes.
+_FLV_FAILED: set[str] = set()
+
+
+def _timeline_s(path: Path) -> float | None:
+    """Where the file's packets end, read off a demux of the whole stream.
+
+    Not the header: a live FLV's stated duration is stale. Item 250's said
+    10646.6 s while its packets ran to 10788.75 s, and a check against it
+    threw away a good MP4.
+    """
+    try:
+        out = subprocess.run(
+            [FFMPEG, "-nostats", "-v", "info", "-i", str(path),
+             "-c", "copy", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=3600,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    hits = _TIME_RE.findall(out.stderr)
+    if not hits:
+        return None
+    h, m, s = hits[-1]
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+
+async def convert_kept_flvs() -> int:
+    """Remux library recordings that finalize kept as FLV, once there is room.
+
+    The recorder keeps the FLV when the MP4 copy would take the disk below the
+    space floor (recorder._finalize_container), and nothing ever came back for
+    it. Browsers do not play FLV, so item 250 (4.5 GB, kept at 5.7% free on
+    2026-10-25) sat unplayable with 22 GB free two days later. The FLV goes
+    only once the MP4 is known to hold the same timeline.
+    """
+    async with _db() as session:
+        items = (
+            await session.execute(
+                select(models.LibraryItem).where(
+                    models.LibraryItem.media_type == "recording",
+                    models.LibraryItem.file_path.like("%.flv"),
+                )
+            )
+        ).scalars().all()
+    converted = 0
+    for item in items:
+        src = Path(item.file_path)
+        dst = src.with_suffix(".mp4")
+        if str(src) in _FLV_FAILED or not src.is_file():
+            continue
+        if dst.exists():
+            if await _already_registered(dst):
+                continue  # somebody's library file, not ours to replace
+            # A conversion cut off by a restart (or a remux timeout, which
+            # leaves its output) would otherwise block this item for good.
+            dst.unlink(missing_ok=True)
+        # The floor alone is not enough room: a capture running beside this
+        # copy would cross it and get stopped. Keep the margin a new capture
+        # needs to start.
+        usage = storage.disk_usage()
+        margin = int(usage.total * storage.RESUME_MARGIN_PCT / 100) if usage else 0
+        if not await storage.room_for_copy(src.stat().st_size + margin):
+            continue
+        ok = await remux_to_mp4(src, dst)
+        if ok:
+            a, b = await asyncio.gather(
+                asyncio.to_thread(_timeline_s, src), asyncio.to_thread(_timeline_s, dst)
+            )
+            ok = a is not None and b is not None and abs(a - b) <= 2.0
+        if not ok:
+            dst.unlink(missing_ok=True)
+            _FLV_FAILED.add(str(src))
+            log.warning("could not convert %s to MP4; keeping the FLV", src.name)
+            continue
+        async with _db() as session:
+            moved = await session.execute(
+                update(models.LibraryItem)
+                .where(models.LibraryItem.id == item.id)
+                .values(file_path=str(dst), size_bytes=dst.stat().st_size)
+            )
+            if moved.rowcount == 0:
+                # Deleted from the library while it was being converted.
+                dst.unlink(missing_ok=True)
+                continue
+            await session.execute(
+                update(models.LiveRecording)
+                .where(models.LiveRecording.output_path == str(src))
+                .values(output_path=str(dst))
+            )
+            await session.commit()
+        src.unlink(missing_ok=True)
+        log.info("converted kept FLV %s -> %s", src.name, dst.name)
+        events.publish({"type": "recording.converted", "file": dst.name, "item_id": item.id})
+        converted += 1
+    return converted
+
+
 class RecoveryService:
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
@@ -288,6 +387,10 @@ class RecoveryService:
                 await self.sweep_once()
             except Exception:
                 log.exception("orphan recovery sweep failed")
+            try:
+                await convert_kept_flvs()
+            except Exception:
+                log.exception("FLV conversion sweep failed")
             await asyncio.sleep(SWEEP_INTERVAL_S)
 
     async def sweep_once(self) -> int:

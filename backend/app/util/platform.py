@@ -27,6 +27,16 @@ _TRACKING_RE = re.compile(
 )
 
 
+# Platforms whose profile listing cannot answer at all. yt-dlp's
+# instagram:user ships _WORKING = False and failed "Unable to extract data" on
+# _hiyori_0203 (2026-10-27). So a watch add skips the listing when the URL
+# already names the account, and the poller never asks it for posts: it raised
+# before the live check, so a watch with the default scope ("both") never
+# looked for a live at all. Lives go through /<handle>/live instead
+# (poller._LIVE_TEMPLATES).
+LISTING_BROKEN = frozenset({"instagram"})
+
+
 def _ensure_scheme(url: str) -> str:
     url = url.strip()
     if url and "://" not in url:

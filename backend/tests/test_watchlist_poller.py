@@ -280,6 +280,28 @@ def test_add_auth_walled_url_points_at_credentials(watch_env, monkeypatch):
     assert "Credentials" in detail and "instagram cookies" in detail
 
 
+def test_an_instagram_profile_is_watched_without_the_broken_listing(watch_env, monkeypatch):
+    """yt-dlp's instagram:user answers every profile with "Unable to extract
+    data" (_hiyori_0203, 2026-10-27); the handle in the URL is all a watch
+    needs, so the add must not depend on it."""
+    import app.routers.watchlist as wl
+
+    calls = []
+
+    def broken(url, cookiefile=None, **kw):
+        calls.append(url)
+        raise RuntimeError("ERROR: [instagram:user] _hiyori_0203: Unable to extract data")
+
+    monkeypatch.setattr(wl.ytdlp, "probe", broken)
+    r = watch_env["client"].post(
+        "/api/watchlist",
+        json={"url": "https://www.instagram.com/_hiyori_0203", "scope": "lives"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["creator_id"] == "_hiyori_0203"
+    assert calls == []
+
+
 def test_add_broken_url_is_never_swallowed(watch_env, monkeypatch):
     """Only anti-bot walls are survivable — a dead profile still 400s."""
     import app.routers.watchlist as wl
@@ -944,6 +966,38 @@ async def test_tiktok_golive_records_the_live_room(watch_env, monkeypatch):
     async with db_mod.async_session() as s:
         recs = (await s.execute(select(LiveRecording))).scalars().all()
     assert [r.room_url for r in recs] == ["https://www.tiktok.com/@someone/live"]
+
+
+async def test_an_instagram_watch_with_the_default_scope_still_checks_lives(
+    watch_env, monkeypatch
+):
+    """scope "both" made the poller ask instagram:user for posts first; it
+    raises on every profile, before the live check could run."""
+    c, st = watch_env["client"], watch_env
+    r = c.post("/api/watchlist", json={"url": "https://www.instagram.com/_hiyori_0203"})
+    assert r.status_code == 201, r.text
+
+    import app.services.poller as pl
+
+    probed = []
+
+    def probe(url, cookiefile=None, *, extract_flat=False, playlist_items=None):
+        probed.append(url)
+        if url.endswith("/live"):
+            return {"is_live": True, "id": "1393932716146299"}
+        raise RuntimeError("ERROR: [instagram:user] _hiyori_0203: Unable to extract data")
+
+    monkeypatch.setattr(pl.ytdlp, "probe", probe)
+    await st["sweep"]()
+
+    assert probed == ["https://www.instagram.com/_hiyori_0203/live"]
+    from app import db as db_mod
+    from app.models import LiveRecording
+    from sqlalchemy import select
+
+    async with db_mod.async_session() as s:
+        recs = (await s.execute(select(LiveRecording))).scalars().all()
+    assert [r.room_url for r in recs] == ["https://www.instagram.com/_hiyori_0203/live"]
 
 
 async def test_stored_live_url_still_wins(watch_env, monkeypatch):

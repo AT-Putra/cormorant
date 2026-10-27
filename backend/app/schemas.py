@@ -34,6 +34,8 @@ class ProbeResult(BaseModel):
     # cap. yt-dlp writes a merged id ('137+140') when it intends to mux, so
     # this is not always one of the ids in formats.
     best_format_id: str | None = None
+    # A live stream offers Record live: the recorder, not a download job.
+    is_live: bool = False
 
 
 class DownloadJobCreate(BaseModel):

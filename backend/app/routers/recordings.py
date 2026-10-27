@@ -11,7 +11,7 @@ from app.db import get_session
 from app.models import LiveRecording
 from app.services import storage
 from app.services.recorder import begin_recording, recorder
-from app.util.platform import detect_platform
+from app.util.platform import creator_id_from_url, detect_platform
 
 
 def get_recorder():
@@ -87,7 +87,10 @@ async def record_live(
     if not platform:
         raise HTTPException(400, detail="Unsupported URL")
     await _require_room_to_start()
-    rec = await begin_recording(body.url, platform, creator="", origin="manual")
+    # The handle in a /<user>/live URL names the folder; an empty creator
+    # put manual captures in a nameless one.
+    creator = creator_id_from_url(body.url) or ""
+    rec = await begin_recording(body.url, platform, creator=creator, origin="manual")
     return _rec_out(rec)
 
 

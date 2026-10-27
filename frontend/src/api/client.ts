@@ -32,6 +32,8 @@ export interface ProbeResult {
    *  A merged id ("137+140") when yt-dlp plans to mux, so it is not always
    *  one of the ids in `formats`. Null when the probe reported no selection. */
   best_format_id?: string | null;
+  /** A live stream: offer Record live, which goes through the recorder. */
+  is_live?: boolean;
 }
 
 export interface DownloadJob {

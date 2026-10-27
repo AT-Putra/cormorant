@@ -228,11 +228,35 @@ def drop_part_suffix(path: Path) -> Path:
         return path
 
 
+def instagram_dash(room_url: str, cookiefile: str | None = None) -> tuple[str, str]:
+    """(manifest URL, User-Agent) of a running instagram live. Synchronous.
+
+    yt-dlp finds an instagram broadcast (the instagram_live plugin) but cannot
+    record it: it hands live DASH to ffmpeg, and ffmpeg's dash demuxer rejects
+    instagram's manifest. Measured 2026-10-27 on _hiyori_0203: the .mpd comes
+    back 200 with `Transfer-Encoding: chunked`, `Connection: close` and no
+    Content-Length; ffmpeg reads all 3401 bytes, logs "Last chunk received",
+    and still fails with "Unable to read to manifest" (exit 251, EIO). The same
+    happens with -icy 0, -seekable 0 and -multiple_requests 0. Every instagram
+    live job had died that way (jobs 6 and 20). streamlink's own DASH client
+    read the same manifest and recorded 25.7 s of h264+aac whose 765 frames
+    were all distinct, so the engine is handed the manifest, not the page.
+    """
+    info = ytdlp.probe(room_url, cookiefile)
+    if not info.get("is_live"):
+        raise RuntimeError("instagram: the broadcast is not live")
+    for f in info.get("formats") or []:
+        if f.get("manifest_url"):
+            return f["manifest_url"], (f.get("http_headers") or {}).get("User-Agent", "")
+    raise RuntimeError("instagram: the live answer carried no DASH manifest")
+
+
 def engine_chain(
     room_url: str,
     outtmpl: str,
     cookiefile: str | None = None,
     quality: str | None = None,
+    dash_manifest: tuple[str, str] | None = None,
 ) -> list[list[str]]:
     """Ordered engine commands: yt-dlp live first, one streamlink retry.
 
@@ -290,6 +314,15 @@ def engine_chain(
     # via its own qn parameter — so for those the cap simply no-ops into
     # `best`, which is the pre-existing behaviour and still records.
     stream_pref = f"{quality},best" if sort else "best"
+
+    if dash_manifest:
+        # instagram (see instagram_dash): streamlink is the only engine, since
+        # the yt-dlp lane ends in the ffmpeg demuxer that cannot read the
+        # manifest. FLV out, so the capture is what capture_path's name says.
+        manifest, user_agent = dash_manifest
+        ua = ["--http-header", f"User-Agent={user_agent}"] if user_agent else []
+        return [[*streamlink_cmd, *ua, "--ffmpeg-fout", "flv",
+                 f"dash://{manifest}", stream_pref, "-o", outtmpl]]
 
     return [
         [*ytdlp_cmd, room_url, "-o", outtmpl],
@@ -573,11 +606,19 @@ class RecorderSupervisor:
 
             async with _db() as settings_session:
                 quality = (await aget_settings(settings_session)).default_quality
+            dash_manifest = None
+            if rec.platform == "instagram":
+                # Raising here (offline, logged out) fails the recording with
+                # the reason, through _supervise.
+                dash_manifest = await asyncio.to_thread(
+                    instagram_dash, rec.room_url, str(cookiefile) if cookiefile else None
+                )
             chain = engine_chain(
                 rec.room_url,
                 str(capture_path),
                 str(cookiefile) if cookiefile else None,
                 quality,
+                dash_manifest,
             )
             for cmd in chain:
                 if self._shutting_down:
@@ -636,6 +677,13 @@ class RecorderSupervisor:
             await self._finalize(
                 recording_id, "interrupted", final_path, "interrupted by app restart"
             )
+        elif final_path is not None:
+            # The last engine failed AFTER writing: hours of capture, remuxed
+            # just above, used to finalize as 'failed' with no path and sit on
+            # disk where no sweep looks. Matters more since instagram's only
+            # engine is streamlink, whose CDN errors end a long capture
+            # non-zero. Keep it the way a restart's cut capture is kept.
+            await self._finalize(recording_id, "interrupted", final_path, err)
         else:
             await self._finalize(
                 recording_id, "failed", None, err or "engine produced no output"

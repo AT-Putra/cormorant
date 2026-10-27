@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.models import CreatorWatch
 from app.services import live_rooms, ytdlp
-from app.util.platform import creator_id_from_url, detect_platform
+from app.util.platform import LISTING_BROKEN, creator_id_from_url, detect_platform
 
 log = logging.getLogger(__name__)
 
@@ -178,12 +178,17 @@ async def add_watch(
     # here would be circular.
     from app.routers.credentials import aget_cookiefile
 
-    cookiefile = await aget_cookiefile(platform)
     url_id = creator_id_from_url(body.url)
+    # A probe could only turn a URL that already names the account into a 400.
+    skip_listing = bool(url_id) and platform in LISTING_BROKEN
+    cookiefile = None if skip_listing else await aget_cookiefile(platform)
     try:
-        info, entry = await _probe_creator(
-            body.url, str(cookiefile) if cookiefile else None
-        )
+        if skip_listing:
+            info, entry = {}, {}
+        else:
+            info, entry = await _probe_creator(
+                body.url, str(cookiefile) if cookiefile else None
+            )
     except Exception as exc:
         # bilibili answers space listings with 412 whenever the egress IP is
         # rate-limited (minutes to hours, cookies do not lift it). A profile

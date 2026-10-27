@@ -222,6 +222,18 @@ def test_probe_keeps_live_formats_with_tier_and_protocol(client, monkeypatch):
     assert [f["format_id"] for f in fmts] == ["source-0", "source-2"]
     assert all(f["format_note"] == "原画" for f in fmts)
     assert [f["protocol"] for f in fmts] == ["m3u8_native", "https"]
+    assert r.json()["is_live"] is False  # the fixture carries no is_live
+
+
+def test_probe_says_when_the_url_is_live(client, monkeypatch):
+    """The page offers Record live on this; for instagram it is the only lane."""
+    c, _stub, dl = client
+    monkeypatch.setattr(
+        dl.ytdlp, "probe", lambda url, cookiefile=None, **kw: {**_live_probe_info(), "is_live": True}
+    )
+    r = c.post("/api/downloads/probe", json={"url": "https://www.instagram.com/u/live/"})
+    assert r.status_code == 200
+    assert r.json()["is_live"] is True
 
 
 def test_probe_invalid_url_400(client):

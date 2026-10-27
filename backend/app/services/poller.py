@@ -15,6 +15,7 @@ from sqlalchemy import select
 from app import models
 from app.services import credential_health, events, storage, ytdlp
 from app.services.settings_store import aget_settings
+from app.util.platform import LISTING_BROKEN
 
 log = logging.getLogger(__name__)
 
@@ -240,7 +241,9 @@ class PollerService:
         if not url:
             raise ValueError(f"no profile template for platform {watch.platform}")
         wants_live = watch.scope in ("lives", "both")
-        wants_posts = watch.scope in ("posts", "both")
+        wants_posts = (
+            watch.scope in ("posts", "both") and watch.platform not in LISTING_BROKEN
+        )
         # A known room answers the live question on its own, so a lives-only
         # watch never touches the listing — which is what keeps bilibili lives
         # working while its space API is rate-limiting us (412), and what keeps

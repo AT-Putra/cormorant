@@ -111,6 +111,7 @@ async def probe_url(
         duration=info.get("duration"),
         formats=_quality_options(info),
         best_format_id=(str(info["format_id"]) if info.get("format_id") else None),
+        is_live=bool(info.get("is_live")),
     )
 
 
