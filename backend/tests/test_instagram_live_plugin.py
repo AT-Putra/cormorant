@@ -276,6 +276,18 @@ def test_an_owner_seen_once_is_remembered(_fresh_user_ids):
     assert ie.user_id("https://www.instagram.com/zonezicos/live/") == "42"
 
 
+def test_user_id_reads_the_profile_page_before_the_rate_limited_lookup():
+    """yuenkl.__ (2026-10-27): the API lookup refused, the page named the id."""
+    ie = _stub(
+        answers={
+            "www.instagram.com/zonezicos/": (
+                '<html>..."page_id":"profilePage_42",..."profile_id":"42"...</html>'
+            ),
+        }
+    )
+    assert ie.user_id("https://www.instagram.com/zonezicos/live/") == "42"
+
+
 def test_user_id_reads_the_owner_off_a_broadcast_link():
     """Adding a watch from a live link works even while the handle lookup is
     refused: the broadcast info carries the owner."""

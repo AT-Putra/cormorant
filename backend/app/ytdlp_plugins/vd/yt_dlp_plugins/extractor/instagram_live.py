@@ -72,6 +72,7 @@ DEVNULL; the probe that precedes a capture is where to read this.
 """
 
 import logging
+import re
 import xml.etree.ElementTree as ET
 
 from yt_dlp.extractor.instagram import InstagramBaseIE
@@ -202,8 +203,9 @@ class InstagramLiveIE(InstagramBaseIE):
 
         Public because the app stores it with an instagram watch as
         ?target_user_id=, and a stored id never needs the rate-limited handle
-        lookup again. Tried cheapest first: the URL, the cache, the owner of
-        the broadcast the URL names, and only then users/web_profile_info/.
+        lookup again. Tried in this order: the URL, the cache, the owner of
+        the broadcast the URL names, the profile page, and only then
+        users/web_profile_info/.
         """
         username = self._match_id(url)
         query = parse_qs(url)
@@ -213,6 +215,18 @@ class InstagramLiveIE(InstagramBaseIE):
         if not user_id and via_broadcast and broadcast_id:
             self._remember(self._broadcast_by_id(broadcast_id))
             user_id = _USER_IDS.get(username.lower())
+        if not user_id:
+            # The profile PAGE names the account too, and answered (200, both
+            # patterns agreeing on one id) for yuenkl.__ while the API lookup
+            # below was still refused, 2026-10-27.
+            page = self._download_webpage(
+                f'https://www.instagram.com/{username}/', username,
+                'Reading the account id off the profile page', fatal=False)
+            found = re.search(
+                r'"profilePage_(\d+)"|"profile_id"\s*:\s*"(\d+)"', page or '')
+            user_id = found and (found.group(1) or found.group(2))
+            if user_id:
+                _USER_IDS[username.lower()] = user_id
         if not user_id:
             user_id = traverse_obj(self._api_json(
                 'users/web_profile_info/', username, 'Resolving the account id',

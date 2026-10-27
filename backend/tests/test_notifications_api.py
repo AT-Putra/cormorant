@@ -263,10 +263,13 @@ async def test_creator_toggle_off_blocks_send(authed_client, crypto_tmp, fake_ht
 
 
 async def test_stale_credentials_reach_the_channel(
-    authed_client, crypto_tmp, fake_httpx
+    authed_client, crypto_tmp, fake_httpx, monkeypatch
 ):
     from tests.conftest import current_db
 
+    # put_config stores a 23:00-07:00 quiet window, so on the real clock this
+    # failed every night (caught at 23:02).
+    freeze_now(monkeypatch, 12, 0)
     client, _ = authed_client
     put_config(client)
     await _seed_watch(current_db(), notify_golive=False)
