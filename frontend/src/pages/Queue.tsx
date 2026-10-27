@@ -393,12 +393,17 @@ export default function Queue() {
                   Record live
                 </button>
               )}
-              <button onClick={() => start(false)} disabled={busy} className="btn-primary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-40">
-                Download
-              </button>
-              <button onClick={() => start(true)} disabled={busy} className="btn-secondary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm text-ink-dim disabled:cursor-not-allowed disabled:opacity-40">
-                Re-download (ignore duplicates)
-              </button>
+              {/* Both of these queue a download job, the lane that fails. */}
+              {!(probe.is_live && probe.platform === "instagram") && (
+                <>
+                  <button onClick={() => start(false)} disabled={busy} className="btn-primary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-40">
+                    Download
+                  </button>
+                  <button onClick={() => start(true)} disabled={busy} className="btn-secondary min-h-[44px] cursor-pointer rounded-xl px-5 py-2.5 text-sm text-ink-dim disabled:cursor-not-allowed disabled:opacity-40">
+                    Re-download (ignore duplicates)
+                  </button>
+                </>
+              )}
             </div>
           </div>
         )}

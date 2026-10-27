@@ -189,14 +189,105 @@ def _extract(ie, url="https://www.instagram.com/zonezicos/live/"):
     return ie._real_extract(url)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_user_ids(monkeypatch):
+    """The plugin remembers account ids process-wide; tests start blank."""
+    import yt_dlp_plugins.extractor.instagram_live as mod
+
+    monkeypatch.setattr(mod, "_USER_IDS", {})
+    return mod
+
+
 def test_idle_creator_is_worded_the_way_the_app_matches_on():
     # Both matchers key off the words, not a status code. A spelling neither
     # knows publishes a watch.poll_error every sweep describing normal life.
-    ie = _stub(answers={})  # every route answers nothing
+    # The account is known and web_info answers JSON with no broadcast in it.
+    ie = _stub(answers={"live/web_info/": '{"message": "not live", "status": "fail"}'})
     with pytest.raises(UserNotLive) as exc:
-        _extract(ie)
+        _extract(ie, "https://www.instagram.com/zonezicos/live/?target_user_id=42")
     assert poller._OFFLINE_RE.search(str(exc.value))
     assert _is_stream_over(exc.value)
+
+
+def test_a_refused_live_check_is_not_reported_as_idle():
+    """A 429 or an HTML shell from web_info is a refusal, not an answer."""
+    ie = _stub(answers={})  # web_info answers nothing usable
+    with pytest.raises(Exception) as exc:
+        _extract(ie, "https://www.instagram.com/zonezicos/live/?target_user_id=42")
+    assert not isinstance(exc.value, UserNotLive)
+    assert not poller._OFFLINE_RE.search(str(exc.value))
+
+
+def test_fields_that_are_present_but_empty_are_no_broadcast():
+    assert _live_ie_class()._as_broadcast(
+        {"dash_playback_url": None, "broadcast_status": None}) is None
+
+
+def test_an_unresolvable_account_is_not_reported_as_idle():
+    """users/web_profile_info/ answered 429 while _hiyori_0203 was live, and
+    the plugin said "not currently live". With no account id it cannot know."""
+    ie = _stub(answers={})  # the handle lookup is refused
+    with pytest.raises(Exception) as exc:
+        _extract(ie)
+    assert not isinstance(exc.value, UserNotLive)
+    assert not poller._OFFLINE_RE.search(str(exc.value))
+    assert "rate-limited" in str(exc.value)
+
+
+def test_a_stored_account_id_skips_the_handle_lookup():
+    """?target_user_id= is what the app stores with a watch."""
+    ie = _stub(
+        answers={
+            "users/web_profile_info/": '{"data": {"user": {"id": "999"}}}',
+            "live/web_info/": (
+                '{"id": "77", "broadcast_status": "active",'
+                ' "dash_playback_url": "https://cdn.example/m.mpd"}'
+            ),
+        },
+        formats=[{"url": "https://cdn.example/seg", "format_id": "dash-0"}],
+    )
+    asked = []
+    real = ie._download_webpage
+
+    def spy(url, *a, **k):
+        asked.append((url.rsplit("/v1/", 1)[-1], (k.get("query") or {}).get("target_user_id")))
+        return real(url, *a, **k)
+
+    ie._download_webpage = spy
+    info = _extract(ie, "https://www.instagram.com/zonezicos/live/?target_user_id=42")
+    assert info["id"] == "77"
+    assert asked == [("live/web_info/", "42")]
+
+
+def test_an_owner_seen_once_is_remembered(_fresh_user_ids):
+    """Any broadcast answer names its owner; the next handle-only check uses it."""
+    ie = _stub(
+        answers={
+            "live/1810/info/": (
+                '{"id": "1810", "broadcast_status": "active",'
+                ' "dash_playback_url": "https://cdn.example/m.mpd",'
+                ' "broadcast_owner": {"username": "ZoneZicos", "pk": "42"}}'
+            )
+        },
+        formats=[{"url": "https://cdn.example/seg", "format_id": "dash-0"}],
+    )
+    _extract(ie, "https://www.instagram.com/zonezicos/live/?broadcast_id=1810")
+    assert _fresh_user_ids._USER_IDS == {"zonezicos": "42"}
+    assert ie.user_id("https://www.instagram.com/zonezicos/live/") == "42"
+
+
+def test_user_id_reads_the_owner_off_a_broadcast_link():
+    """Adding a watch from a live link works even while the handle lookup is
+    refused: the broadcast info carries the owner."""
+    ie = _stub(
+        answers={
+            "live/1810/info/": (
+                '{"id": "1810", "broadcast_status": "active",'
+                ' "broadcast_owner": {"username": "zonezicos", "pk": "42"}}'
+            )
+        }
+    )
+    assert ie.user_id("https://www.instagram.com/zonezicos/live/?broadcast_id=1810") == "42"
 
 
 def test_no_session_is_a_login_error_not_an_idle_creator():
@@ -279,14 +370,14 @@ def test_a_replay_is_downloadable_but_not_reported_as_live():
 
 
 def test_a_dead_broadcast_id_falls_through_to_the_running_one():
-    # A pasted URL outlives the broadcast it names. The story-feed route knows
-    # the current one; the switch is stated rather than done silently.
+    # A pasted URL outlives the broadcast it names. live/web_info/ knows the
+    # current one; the switch is stated rather than done silently.
     ie = _stub(
         answers={
             "users/web_profile_info/": '{"data": {"user": {"id": "42"}}}',
-            "feed/user/42/story/": (
-                '{"broadcast": {"id": "9999", "broadcast_status": "active",'
-                ' "dash_playback_url": "https://cdn.example/m.mpd"}}'
+            "live/web_info/": (
+                '{"id": "9999", "broadcast_status": "active",'
+                ' "dash_playback_url": "https://cdn.example/m.mpd"}'
             ),
         },
         formats=[{"url": "https://cdn.example/seg", "format_id": "dash-0"}],

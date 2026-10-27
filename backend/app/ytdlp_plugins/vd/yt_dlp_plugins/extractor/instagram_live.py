@@ -24,9 +24,13 @@ dash_abr_playback_url and, on some answers, the manifest inline as
 dash_manifest. All three are read, in that order.
 
 A URL with no ?broadcast_id= -- the shape the poller synthesizes for a watch,
-and the shape a person types -- names no broadcast, so the handle is turned
-into an account id through users/web_profile_info/ and the running broadcast
-is read off feed/user/<id>/story/, which carries it beside the stories.
+and the shape a person types -- names no broadcast, so the running one is read
+off live/web_info/?target_user_id=<account id>, the route instagram.com's own
+/<user>/live/ page uses. The account id comes from ?target_user_id= (which
+the app stores with a watch), a cache of every owner seen, or as a last
+resort users/web_profile_info/, which Instagram rate-limits (see _USER_IDS).
+The story feed (feed/user/<id>/story/) that used to carry the broadcast
+refused a signed-in session outright on 2026-10-27.
 
 Authentication is not optional, and the refusal lies
 ----------------------------------------------------
@@ -102,6 +106,15 @@ _MANIFEST_FIELDS = ('dash_playback_url', 'dash_abr_playback_url', 'dash_manifest
 
 log = logging.getLogger(__name__)
 
+# handle (lowercased) -> numeric account id. The id never changes, and the
+# one route that maps a handle to it, users/web_profile_info/, is the one
+# Instagram rate-limits: measured 2026-10-27 with _hiyori_0203 live, it
+# answered 429 on its first call of the day (users/<pk>/info/ too), while
+# live/<id>/info/ and live/web_info/ kept answering. So every answer that
+# names an owner is remembered, and the app stores the id with a watch
+# (?target_user_id=), leaving the handle lookup as a last resort.
+_USER_IDS: dict[str, str] = {}
+
 
 class InstagramLiveIE(InstagramBaseIE):
     IE_NAME = 'instagram:live'
@@ -120,7 +133,7 @@ class InstagramLiveIE(InstagramBaseIE):
         'only_matching': True,
     }]
 
-    def _api_json(self, path, video_id, note, query=None):
+    def _api_json(self, path, video_id, note, query=None, expected_status=None):
         """Parsed JSON from the private API, or None when Instagram refused.
 
         Classified by body, never by status: signed out, the live route
@@ -132,7 +145,7 @@ class InstagramLiveIE(InstagramBaseIE):
         body = self._download_webpage(
             f'{self._API_BASE_URL}/{path}', video_id, note=note,
             errnote=f'{note}: request failed', fatal=False, query=query or {},
-            headers=self._api_headers,
+            headers=self._api_headers, expected_status=expected_status,
             impersonate=self._can_impersonate and self._is_web_app)
         if not body:
             return None
@@ -162,7 +175,10 @@ class InstagramLiveIE(InstagramBaseIE):
         shape of the envelope, so a wrapper appearing or disappearing around
         it costs nothing."""
         for candidate in (data, traverse_obj(data, ('broadcast', {dict}))):
-            if candidate and any(k in candidate for k in
+            # Values, not just keys: an answer carrying the fields as null is
+            # no broadcast, and read as one it ends in "carries no playable
+            # manifest", which the poller files as an error every sweep.
+            if candidate and any(candidate.get(k) for k in
                                  (*_MANIFEST_FIELDS, 'broadcast_status')):
                 return candidate
         return None
@@ -173,22 +189,68 @@ class InstagramLiveIE(InstagramBaseIE):
             f'live/{broadcast_id}/info/', broadcast_id,
             'Downloading broadcast info'))
 
-    def _current_broadcast(self, username):
+    @staticmethod
+    def _remember(broadcast):
+        """Learn the owner's account id from any broadcast answer."""
+        owner = traverse_obj(broadcast, ('broadcast_owner', {dict})) or {}
+        name, pk = owner.get('username'), traverse_obj(owner, ('pk', {str_or_none}))
+        if name and pk:
+            _USER_IDS[name.lower()] = pk
+
+    def user_id(self, url, *, via_broadcast=True):
+        """The numeric account id behind a live URL, or None.
+
+        Public because the app stores it with an instagram watch as
+        ?target_user_id=, and a stored id never needs the rate-limited handle
+        lookup again. Tried cheapest first: the URL, the cache, the owner of
+        the broadcast the URL names, and only then users/web_profile_info/.
+        """
+        username = self._match_id(url)
+        query = parse_qs(url)
+        user_id = (traverse_obj(query, ('target_user_id', 0, {str_or_none}))
+                   or _USER_IDS.get(username.lower()))
+        broadcast_id = traverse_obj(query, ('broadcast_id', 0, {str_or_none}))
+        if not user_id and via_broadcast and broadcast_id:
+            self._remember(self._broadcast_by_id(broadcast_id))
+            user_id = _USER_IDS.get(username.lower())
+        if not user_id:
+            user_id = traverse_obj(self._api_json(
+                'users/web_profile_info/', username, 'Resolving the account id',
+                query={'username': username}),
+                ('data', 'user', ('id', 'pk'), {str_or_none}, any))
+            if user_id:
+                _USER_IDS[username.lower()] = user_id
+        return user_id
+
+    def _current_broadcast(self, url, username):
         """Whatever the account is broadcasting right now, or None.
 
-        Two hops, because nothing maps a handle to a broadcast directly: the
-        handle becomes an account id, and that account's story feed carries
-        the running broadcast alongside its stories.
+        live/web_info/ by account id, the route instagram.com's own
+        /<user>/live/ page reads: it returned the running broadcast, manifests
+        and all. The story feed this used before was refused outright.
+
+        A refusal raises instead of returning None, at both hops: with the
+        lookup refused, "not live" would be a guess, and the poller files
+        UserNotLive as a quiet idle creator -- the way _hiyori_0203 went unseen
+        while live. Only an answer that IS JSON and holds no broadcast means
+        offline; 400 and 404 bodies are read for that, anything else (429,
+        an HTML shell) is a refusal.
         """
-        user_id = traverse_obj(self._api_json(
-            'users/web_profile_info/', username, 'Resolving the account id',
-            query={'username': username}),
-            ('data', 'user', ('id', 'pk'), {str_or_none}, any))
+        user_id = self.user_id(url, via_broadcast=False)
         if not user_id:
-            return None
-        return self._as_broadcast(self._api_json(
-            f'feed/user/{user_id}/story/', username,
-            'Looking for a running broadcast'))
+            raise ExtractorError(
+                f'Instagram would not resolve {username} to an account id '
+                '(refused or rate-limited), so whether they are live is '
+                'unknown', expected=True)
+        answer = self._api_json(
+            'live/web_info/', username, 'Looking for a running broadcast',
+            query={'target_user_id': user_id}, expected_status=(400, 404))
+        if answer is None:
+            raise ExtractorError(
+                f'Instagram refused the live check for {username} (refused or '
+                'rate-limited), so whether they are live is unknown',
+                expected=True)
+        return self._as_broadcast(answer)
 
     def _live_formats(self, broadcast, video_id):
         """The DASH ladder, off whichever manifest field this broadcast has.
@@ -241,10 +303,11 @@ class InstagramLiveIE(InstagramBaseIE):
         via = 'broadcast_id'
         broadcast = self._broadcast_by_id(broadcast_id) if broadcast_id else None
         if not broadcast:
-            via = 'story feed'
-            broadcast = self._current_broadcast(username)
+            via = 'web_info'
+            broadcast = self._current_broadcast(url, username)
         if not broadcast:
             raise UserNotLive(video_id=username)
+        self._remember(broadcast)
 
         current_id = traverse_obj(broadcast, ('id', {str_or_none})) or broadcast_id
         if broadcast_id and current_id and current_id != broadcast_id:

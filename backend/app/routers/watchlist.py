@@ -145,6 +145,32 @@ def _probe_detail(platform: str, exc: Exception, had_cookies: bool) -> str:
     return f"Could not resolve creator from URL: {msg}"
 
 
+async def _instagram_live_url(url: str, handle: str) -> str | None:
+    """The live check by account id, stored with the watch, or None.
+
+    /<handle>/live/ alone sends every poll through the handle lookup that
+    Instagram rate-limits (429 while _hiyori_0203 was live, 2026-10-27);
+    ?target_user_id= goes straight to live/web_info/. Best effort: without an
+    id the watch still works, through that lookup.
+    """
+    from app.routers.credentials import aget_cookiefile
+
+    cookiefile = await aget_cookiefile("instagram")
+    try:
+        user_id = await asyncio.to_thread(
+            ytdlp.instagram_user_id, url, handle, str(cookiefile) if cookiefile else None
+        )
+    except Exception as exc:
+        log.warning("instagram account id for %s not resolved: %s", handle, exc)
+        user_id = None
+    finally:
+        if cookiefile:
+            cookiefile.unlink(missing_ok=True)
+    if not user_id:
+        return None
+    return f"https://www.instagram.com/{handle}/live/?target_user_id={user_id}"
+
+
 async def _probe_creator(url: str, cookie_path: str | None) -> tuple[dict, dict]:
     """Resolve probe: newest page of the listing only, plus one full probe of
     its newest entry when the listing carries no creator name (bilibili space
@@ -224,6 +250,8 @@ async def add_watch(
         raise HTTPException(409, detail="Already watching this creator")
 
     live_url = _clean_live_url(body.live_url, platform)
+    if not live_url and platform == "instagram":
+        live_url = await _instagram_live_url(body.url, creator_id)
     if not live_url:
         # bilibili hides the live room behind a second id no probe reports;
         # fill it once here so the watch has somewhere to point its live

@@ -26,6 +26,9 @@ def watch_env(authed_client, monkeypatch):
     c, stub_manager = authed_client
     rec = StubRecorder()
     monkeypatch.setattr(pl, "get_recorder", lambda: rec)
+    # An instagram add asks Instagram for the account id; no test goes out to
+    # the network for it unless it says so.
+    monkeypatch.setattr(wl.ytdlp, "instagram_user_id", lambda *a, **k: None)
     monkeypatch.setattr(pl, "get_manager", lambda: stub_manager)
 
     state = {
@@ -300,6 +303,49 @@ def test_an_instagram_profile_is_watched_without_the_broken_listing(watch_env, m
     assert r.status_code == 201, r.text
     assert r.json()["creator_id"] == "_hiyori_0203"
     assert calls == []
+
+
+def test_an_instagram_watch_stores_the_account_id_for_its_live_check(watch_env, monkeypatch):
+    """Polled as /<handle>/live/, every check goes through the handle lookup
+    Instagram rate-limits; ?target_user_id= goes straight to live/web_info/."""
+    import app.routers.watchlist as wl
+
+    seen = []
+
+    def user_id(url, handle, cookiefile=None):
+        seen.append((url, handle))
+        return "22217099161"
+
+    monkeypatch.setattr(wl.ytdlp, "instagram_user_id", user_id)
+    url = "https://www.instagram.com/_hiyori_0203/live/?broadcast_id=1393932716146299"
+    r = watch_env["client"].post("/api/watchlist", json={"url": url, "scope": "lives"})
+    assert r.status_code == 201, r.text
+    assert r.json()["creator_id"] == "_hiyori_0203"
+    assert r.json()["live_url"] == (
+        "https://www.instagram.com/_hiyori_0203/live/?target_user_id=22217099161"
+    )
+    assert seen == [(url, "_hiyori_0203")]
+
+
+def test_no_instagram_cookies_means_no_account_lookup():
+    """Every route is account-only; signed out, the lookup only costs a 429."""
+    from app.services import ytdlp
+
+    assert ytdlp.instagram_user_id("https://www.instagram.com/u/live/", "u", None) is None
+
+
+def test_an_instagram_watch_without_an_account_id_still_gets_added(watch_env, monkeypatch):
+    import app.routers.watchlist as wl
+
+    def refused(url, handle, cookiefile=None):
+        raise RuntimeError("HTTP Error 429: Too Many Requests")
+
+    monkeypatch.setattr(wl.ytdlp, "instagram_user_id", refused)
+    r = watch_env["client"].post(
+        "/api/watchlist", json={"url": "https://www.instagram.com/_hiyori_0203"}
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["live_url"] is None
 
 
 def test_add_broken_url_is_never_swallowed(watch_env, monkeypatch):

@@ -278,6 +278,28 @@ def download(opts: dict, url: str) -> dict:
         return ydl.sanitize_info(ydl.extract_info(url, download=True))
 
 
+def instagram_user_id(url: str, handle: str, cookiefile: str | None = None) -> str | None:
+    """Numeric account id for an instagram watch, or None. Synchronous.
+
+    Asks the instagram_live plugin (InstagramLiveIE.user_id), which reads it
+    off a live link's broadcast when there is one -- the route that kept
+    answering while the handle lookup was rate-limited -- and only then
+    falls back to that lookup.
+    """
+    if not cookiefile:
+        return None  # every route is account-only; signed out it only costs a 429
+    opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "http_headers": dict(HTTP_HEADERS),
+        "cookiefile": cookiefile,
+    }
+    with YoutubeDL(opts) as ydl:
+        ie = ydl.get_info_extractor("InstagramLive")
+        live = url if ie.suitable(url) else f"https://www.instagram.com/{handle}/live/"
+        return ie.user_id(live)
+
+
 def backup_mirror_opts(url: str) -> dict | None:
     """Opts that move a download onto the stream's backup CDN mirror, or None
     when nothing handling `url` has one.
