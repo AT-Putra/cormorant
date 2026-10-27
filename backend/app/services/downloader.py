@@ -329,7 +329,39 @@ class DownloadManager:
                     if cookiefile:
                         extra["cookiefile"] = str(cookiefile)
                     opts = ytdlp.build_opts(job, settings, extra=extra)
-                    info = await asyncio.to_thread(ytdlp.download, opts, job.url)
+                    try:
+                        info = await asyncio.to_thread(ytdlp.download, opts, job.url)
+                    except Exception as exc:
+                        # A CDN edge with a dead stretch in the file fails every
+                        # resume at the same byte, and a reconnect only helps
+                        # when this run wrote bytes: job 19 retried for four
+                        # days at byte 63274104. So go to the backup mirror
+                        # once, here, before the error counts against the run.
+                        mirror = ytdlp.backup_mirror_opts(job.url)
+                        if (
+                            mirror is None
+                            or isinstance(exc, ytdlp.AbortDownload)
+                            or abort.is_set()
+                            or not _is_reconnectable(exc)
+                            or job.id in self._cancelled
+                        ):
+                            raise
+                        log.warning(
+                            "job %s: %s; retrying from the backup mirror",
+                            job.id, str(exc)[:200],
+                        )
+                        # The base host's error, kept: the job's own error
+                        # will be the mirror's if that fails too.
+                        events.publish(
+                            {
+                                "type": "job.switching_mirror",
+                                "job_id": job.id,
+                                "error": str(exc)[:200],
+                            }
+                        )
+                        info = await asyncio.to_thread(
+                            ytdlp.download, {**opts, **mirror}, job.url
+                        )
                 finally:
                     if cookiefile:
                         cookiefile.unlink(missing_ok=True)

@@ -720,6 +720,94 @@ async def test_failed_job_records_error(mgr, db, fake_engine):
     assert "extractor" in job.error
 
 
+# Job 19's error: the CDN edge cut every resume at the same byte, with no new
+# bytes on disk, so the reconnect chain never even started.
+CDN_CUT = "ERROR: \r[download] Got error: 195 bytes read, 4179998 more expected."
+
+
+async def test_a_cdn_cut_retries_once_from_the_backup_mirror(mgr, db, fake_engine):
+    _, add = make_job(db, url="https://www.bilibili.com/video/BV1FZS7B3EeL/")
+    jid = await add()
+    seen = []
+
+    def engine(opts, url):
+        seen.append(opts.get("extractor_args"))
+        if len(seen) == 1:
+            raise RuntimeError(CDN_CUT)
+        return FakeInfo(requested_downloads=[{"filepath": "/m/T.mp4"}])
+
+    fake_engine.download = engine
+    await mgr.run_job(jid)
+    assert seen == [None, {"bilibili": {"mirror": ["1"]}}]
+    assert (await fetch(db, jid)).status == "done"
+
+
+async def test_the_backup_mirror_is_tried_only_once(mgr, db, fake_engine):
+    _, add = make_job(db, url="https://www.bilibili.com/video/BV1FZS7B3EeL/")
+    jid = await add()
+    calls = []
+
+    def engine(opts, url):
+        calls.append(url)
+        raise RuntimeError(CDN_CUT)
+
+    fake_engine.download = engine
+    await mgr.run_job(jid)
+    assert len(calls) == 2
+    job = await fetch(db, jid)
+    assert job.status == "failed"
+    assert "more expected" in job.error
+
+
+async def test_a_pause_during_the_first_attempt_is_not_retried(mgr, db, fake_engine):
+    """Pause can land while yt-dlp is still in its own retries; the error that
+    ends them must not start a second, unpausable-for-a-while attempt."""
+    _, add = make_job(db, url="https://www.bilibili.com/video/BV1FZS7B3EeL/")
+    jid = await add()
+    calls = []
+
+    def engine(opts, url):
+        calls.append(url)
+        mgr._abort_events[jid].set()
+        raise RuntimeError(CDN_CUT)
+
+    fake_engine.download = engine
+    await mgr.run_job(jid)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "url, has_mirror",
+    [
+        ("https://www.bilibili.com/video/BV1FZS7B3EeL/", True),
+        # What the bilibili app shares; it resolves to /video/ only at extraction.
+        ("https://b23.tv/abcd123", True),
+        ("https://live.bilibili.com/5265", False),
+        ("https://www.tiktok.com/@someone/video/1", False),
+    ],
+)
+def test_which_urls_get_a_backup_mirror(url, has_mirror):
+    from app.services import ytdlp
+
+    assert (ytdlp.backup_mirror_opts(url) is not None) is has_mirror
+
+
+async def test_a_live_room_gets_no_mirror_retry(mgr, db, fake_engine):
+    """BiliLiveIE ignores the mirror arg; a retry would only re-extract."""
+    _, add = make_job(db, url="https://live.bilibili.com/5265")
+    jid = await add()
+    calls = []
+
+    def engine(opts, url):
+        calls.append(url)
+        raise RuntimeError(CDN_CUT)
+
+    fake_engine.download = engine
+    await mgr.run_job(jid)
+    assert len(calls) == 1
+    assert (await fetch(db, jid)).status == "failed"
+
+
 async def test_worker_drains_queue(mgr, db, fake_engine):
     jobs = []
     for i in range(3):

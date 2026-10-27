@@ -13,9 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from yt_dlp import YoutubeDL
+from yt_dlp.extractor.bilibili import BiliLiveIE as _BiliLiveIE
 from yt_dlp.globals import plugin_dirs as _plugin_dirs
 from yt_dlp.networking import Request
 from yt_dlp.plugins import load_all_plugins as _load_all_plugins
+
+from app.util.platform import detect_platform
 
 log = logging.getLogger(__name__)
 
@@ -273,6 +276,22 @@ def download(opts: dict, url: str) -> dict:
     """Run a download with prebuilt opts. Synchronous — run via to_thread."""
     with YoutubeDL(opts) as ydl:
         return ydl.sanitize_info(ydl.extract_info(url, download=True))
+
+
+def backup_mirror_opts(url: str) -> dict | None:
+    """Opts that move a download onto the stream's backup CDN mirror, or None
+    when nothing handling `url` has one.
+
+    Only the bilibili_video plugin reads the `mirror` arg. The platform test
+    is deliberately wider than that extractor's URL pattern: links shared
+    from the bilibili app are b23.tv short links, which only resolve to a
+    /video/ page at extraction time. Live rooms are the one shape excluded,
+    since BiliLiveIE ignores the arg and the retry would just re-extract a
+    stream that has moved on.
+    """
+    if detect_platform(url) != "bilibili" or _BiliLiveIE.suitable(url):
+        return None
+    return {"extractor_args": {"bilibili": {"mirror": ["1"]}}}
 
 
 def final_path(info: dict) -> str | None:
