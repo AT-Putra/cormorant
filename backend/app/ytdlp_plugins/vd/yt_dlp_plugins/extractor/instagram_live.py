@@ -27,8 +27,9 @@ A URL with no ?broadcast_id= -- the shape the poller synthesizes for a watch,
 and the shape a person types -- names no broadcast, so the running one is read
 off live/web_info/?target_user_id=<account id>, the route instagram.com's own
 /<user>/live/ page uses. The account id comes from ?target_user_id= (which
-the app stores with a watch), a cache of every owner seen, or as a last
-resort users/web_profile_info/, which Instagram rate-limits (see _USER_IDS).
+the app stores with a watch), a cache of every owner seen, the profile page,
+or as a last resort users/web_profile_info/, which Instagram rate-limits
+(see _USER_IDS).
 The story feed (feed/user/<id>/story/) that used to carry the broadcast
 refused a signed-in session outright on 2026-10-27.
 
@@ -112,8 +113,9 @@ log = logging.getLogger(__name__)
 # Instagram rate-limits: measured 2026-10-27 with _hiyori_0203 live, it
 # answered 429 on its first call of the day (users/<pk>/info/ too), while
 # live/<id>/info/ and live/web_info/ kept answering. So every answer that
-# names an owner is remembered, and the app stores the id with a watch
-# (?target_user_id=), leaving the handle lookup as a last resort.
+# names an owner is remembered, the profile page is read before the API, and
+# the app stores the id with a watch (?target_user_id=), leaving the handle
+# lookup as a last resort.
 _USER_IDS: dict[str, str] = {}
 
 
@@ -222,9 +224,12 @@ class InstagramLiveIE(InstagramBaseIE):
             page = self._download_webpage(
                 f'https://www.instagram.com/{username}/', username,
                 'Reading the account id off the profile page', fatal=False)
-            found = re.search(
-                r'"profilePage_(\d+)"|"profile_id"\s*:\s*"(\d+)"', page or '')
-            user_id = found and (found.group(1) or found.group(2))
+            # The route-scoped profilePage_ id first; a bare profile_id can
+            # belong to anyone the page mentions. Taken only when unambiguous,
+            # since it is stored with the watch for good.
+            ids = (set(re.findall(r'"profilePage_(\d+)"', page or ''))
+                   or set(re.findall(r'"profile_id"\s*:\s*"(\d+)"', page or '')))
+            user_id = ids.pop() if len(ids) == 1 else None
             if user_id:
                 _USER_IDS[username.lower()] = user_id
         if not user_id:
@@ -322,6 +327,13 @@ class InstagramLiveIE(InstagramBaseIE):
         if not broadcast:
             raise UserNotLive(video_id=username)
         self._remember(broadcast)
+        # An account id stored with a watch is trusted for good, so a wrong one
+        # would record somebody else. Say so instead.
+        owner_name = traverse_obj(broadcast, ('broadcast_owner', 'username', {str}))
+        if owner_name and owner_name.lower() != username.lower():
+            raise ExtractorError(
+                f'The live found for {username} belongs to {owner_name}: the '
+                'account id this URL carries is not theirs', expected=True)
 
         current_id = traverse_obj(broadcast, ('id', {str_or_none})) or broadcast_id
         if broadcast_id and current_id and current_id != broadcast_id:

@@ -282,9 +282,9 @@ def instagram_user_id(url: str, handle: str, cookiefile: str | None = None) -> s
     """Numeric account id for an instagram watch, or None. Synchronous.
 
     Asks the instagram_live plugin (InstagramLiveIE.user_id), which reads it
-    off a live link's broadcast when there is one -- the route that kept
-    answering while the handle lookup was rate-limited -- and only then
-    falls back to that lookup.
+    off a live link's broadcast when there is one, then off the profile
+    page -- both kept answering while the handle lookup was rate-limited --
+    and only then falls back to that lookup.
     """
     if not cookiefile:
         return None  # every route is account-only; signed out it only costs a 429

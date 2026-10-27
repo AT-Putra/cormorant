@@ -288,6 +288,33 @@ def test_user_id_reads_the_profile_page_before_the_rate_limited_lookup():
     assert ie.user_id("https://www.instagram.com/zonezicos/live/") == "42"
 
 
+def test_a_page_naming_several_accounts_gives_no_id():
+    """A bare profile_id can be anyone on the page; it is stored for good."""
+    ie = _stub(
+        answers={
+            "www.instagram.com/zonezicos/": '..."profile_id":"7"..."profile_id":"8"...',
+            "users/web_profile_info/": '{"data": {"user": {"id": "42"}}}',
+        }
+    )
+    assert ie.user_id("https://www.instagram.com/zonezicos/live/") == "42"
+
+
+def test_a_live_owned_by_someone_else_is_an_error():
+    """A wrong stored id must not record another account as this creator."""
+    ie = _stub(
+        answers={
+            "live/web_info/": (
+                '{"id": "77", "broadcast_status": "active",'
+                ' "dash_playback_url": "https://cdn.example/m.mpd",'
+                ' "broadcast_owner": {"username": "someone_else", "pk": "42"}}'
+            )
+        },
+        formats=[{"url": "https://cdn.example/seg", "format_id": "dash-0"}],
+    )
+    with pytest.raises(Exception, match="belongs to someone_else"):
+        _extract(ie, "https://www.instagram.com/zonezicos/live/?target_user_id=42")
+
+
 def test_user_id_reads_the_owner_off_a_broadcast_link():
     """Adding a watch from a live link works even while the handle lookup is
     refused: the broadcast info carries the owner."""
